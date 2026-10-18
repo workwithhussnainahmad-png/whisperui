@@ -1,5 +1,5 @@
 {
   "platforms": ["apple", "android"],
-  "android": { "modules": ["com.whisper.privacy.WhisperAttachmentsModule"] },
-  "apple": { "modules": ["WhisperPrivacyModule", "WhisperAttachmentsModule"] }
+  "android": { "modules": ["com.whisper.privacy.WhisperAttachmentsModule", "com.whisper.privacy.WhisperSignalModule", "com.whisper.privacy.WhisperVaultModule"] },
+  "apple": { "modules": ["WhisperPrivacyModule", "WhisperAttachmentsModule", "WhisperSignalModule", "WhisperVaultModule"] }
 }

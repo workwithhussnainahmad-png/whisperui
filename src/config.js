@@ -1,4 +1,7 @@
 // Direct HTTPS transport; this does not route traffic through Tor.
+// Protocol 7 requires an invite-authenticated peer. Environment flags must not
+// silently re-enable the old unauthenticated/public chat paths in this client.
+export const ALLOW_UNVERIFIED_CHATS = false;
 export function getServerUrl() {
   const value = process.env.EXPO_PUBLIC_SERVER_URL || 'https://mywhisperchat.duckdns.org';
   const parsed = new URL(value);

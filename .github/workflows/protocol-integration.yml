@@ -1,0 +1,42 @@
+name: Client and relay integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: Backend commit SHA or branch containing the coordinated protocol changes
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: whisperui
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: MrHussnainAhmad/whisper
+          ref: ${{ inputs.backend_ref }}
+          path: whisper
+          persist-credentials: false
+          token: ${{ secrets.WHISPER_BACKEND_READ_TOKEN || github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+        working-directory: whisper
+      - run: npm ci --ignore-scripts
+        working-directory: whisperui
+      - run: npm test
+        working-directory: whisper
+      - run: npm test
+        working-directory: whisperui
+      - run: npm run test:integration
+        working-directory: whisperui

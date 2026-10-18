@@ -7,7 +7,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import {
-  getSocket, sendMessage, sendImage, sendVideo, sendFile, leaveRoom, reportUser,
+  getSocket, sendMessage, sendImage, sendVideo, sendFile, sendVaultFile, leaveRoom, reportUser,
   startKeyExchange, isE2EReady, ensureKeypair, resetE2E, configureChatSecurity,
   confirmSecureChannel, canSendMessages, decryptIncoming, sendTyping,
   createMessageId, sendReceipt, setMediaSavingAllowed, sendSecurityNotice,
@@ -17,7 +17,7 @@ import {
   addScreenshotListener,
 } from 'expo-screen-capture';
 import { ensureCaptureProtection, isScreenBeingCaptured, observeCaptureState, isExpoGoFeatureTest } from '../services/captureProtection';
-import { saveReceivedMedia } from '../services/mediaExport';
+import { saveToVault, vaultError, getVaultLockState } from '../services/privateVault';
 import { startPeerLiveness } from '../services/peerLiveness';
 import {
   deriveSharedKey,
@@ -28,6 +28,7 @@ import {
 import ChatBubble from '../components/ChatBubble';
 import AttachmentViewer from '../components/AttachmentViewer';
 import MediaPickerButton from '../components/MediaPickerButton';
+import VaultAttachmentPicker from '../components/VaultAttachmentPicker';
 import ChatCamera from '../components/ChatCamera';
 import ScreenContainer from '../components/ScreenContainer';
 import SafetyVerifyOverlay from '../components/SafetyVerifyOverlay';
@@ -100,6 +101,9 @@ export default function ChatScreen({ navigation, route }) {
   const protectionReadyRef = useRef(false);
   const testNoticeSentRef = useRef(false);
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [vaultPickerOpen, setVaultPickerOpen] = useState(false);
+  const vaultSends = useRef(new Map());
+  useEffect(() => () => { for (const controller of vaultSends.current.values()) controller.abort(); vaultSends.current.clear(); }, []);
   const cameraResolver = useRef(null);
   const closeCamera = (asset = null) => {
     const resolve = cameraResolver.current;
@@ -130,10 +134,12 @@ export default function ChatScreen({ navigation, route }) {
     }));
   };
 
-  const processIncoming = (payload) => {
+  const processIncoming = async (payload) => {
     if (!inChatRef.current || endedRef.current) return;
+    const epoch = getChatEpoch();
     try {
-      const msg = decryptIncoming(payload?.encrypted, payload?.messageId);
+      const msg = await decryptIncoming(payload?.encrypted, payload?.messageId);
+      if (!inChatRef.current || endedRef.current || !isChatEpochActive(epoch)) return;
       if (!msg) return; // More encrypted attachment chunks are still arriving.
       if (msg.type === 'heartbeat') { sendHeartbeat(msg.challenge, true).catch(() => {}); return; }
       if (msg.type === 'heartbeat-response') { livenessRef.current?.accept(msg.challenge); return; }
@@ -165,6 +171,7 @@ export default function ChatScreen({ navigation, route }) {
         ts: Date.now(),
       }));
     } catch {
+      if (!inChatRef.current || endedRef.current || !isChatEpochActive(epoch)) return;
       if (!authFailureShownRef.current) {
         authFailureShownRef.current = true;
         setMessages((p) => appendBoundedMessage(p, {
@@ -233,6 +240,8 @@ export default function ChatScreen({ navigation, route }) {
     inChatRef.current = false;
     setPrivacyOverlayVisible(true);
     setViewing(null);
+    setVaultPickerOpen(false);
+    for (const controller of vaultSends.current.values()) controller.abort();
     setText('');
     setVerified(false);
     setAllowSaving(false);
@@ -283,11 +292,14 @@ export default function ChatScreen({ navigation, route }) {
     const acceptPeerKeyConfirmation = async (proof) => {
       if (!stillActive()) return;
       if (peerKeyConfirmedRef.current) return;
-      if (!verifyKeyConfirmation(proof, roomId)) {
+      if (!(await verifyKeyConfirmation(proof, roomId))) {
         failKeyConfirmation();
         return;
       }
       peerKeyConfirmedRef.current = true;
+      const reply = await createKeyConfirmation(roomId);
+      if (!stillActive()) return;
+      if (reply) socket.emit('key-confirm', { proof: reply });
       const code = await getSafetyCode();
       if (!stillActive()) return;
       setSafetyCode(code);
@@ -297,14 +309,16 @@ export default function ChatScreen({ navigation, route }) {
 
     const onPeerKey = async (d) => {
       try {
-        if (d?.protocolVersion !== 6) throw new Error('Unsupported security protocol');
+        if (d?.protocolVersion !== 7) throw new Error('Unsupported security protocol');
         await ensureCaptureProtection();
         if (!stillActive()) return;
         await ensureKeypair();
         if (!stillActive()) return;
-        await deriveSharedKey(d.publicKey);
+        await deriveSharedKey(d.keyBundle);
         if (!stillActive()) return;
-        socket.emit('key-confirm', { proof: createKeyConfirmation(roomId) });
+        const proof = await createKeyConfirmation(roomId);
+        if (!stillActive()) return;
+        if (proof) socket.emit('key-confirm', { proof });
         const pendingProof = pendingKeyConfirmationRef.current;
         pendingKeyConfirmationRef.current = null;
         if (pendingProof) await acceptPeerKeyConfirmation(pendingProof);
@@ -438,12 +452,16 @@ export default function ChatScreen({ navigation, route }) {
       setPrivacyOverlayVisible(state !== 'active');
       if (state === 'background' && inChatRef.current && socket?.connected && !externalMediaRef.current) {
         if (backgroundTimerRef.current) clearTimeout(backgroundTimerRef.current);
-        backgroundTimerRef.current = setTimeout(() => {
+        const leaveAfterAuthentication = () => {
           if (!inChatRef.current || endedRef.current) return;
           if (AppState.currentState !== 'background' && AppState.currentState !== 'inactive') return;
           if (externalMediaRef.current) return;
+          if (getVaultLockState().authenticating) {
+            backgroundTimerRef.current = setTimeout(leaveAfterAuthentication, BACKGROUND_LEAVE_GRACE_MS); return;
+          }
           finishChat('app_background');
-        }, BACKGROUND_LEAVE_GRACE_MS);
+        };
+        backgroundTimerRef.current = setTimeout(leaveAfterAuthentication, BACKGROUND_LEAVE_GRACE_MS);
         return;
       }
       if (state === 'active' && backgroundTimerRef.current) {
@@ -532,10 +550,10 @@ export default function ChatScreen({ navigation, route }) {
     externalMediaRef.current = true;
     if (backgroundTimerRef.current) clearTimeout(backgroundTimerRef.current);
     try {
-      const saved = await saveReceivedMedia(message, () => inChatRef.current && isChatEpochActive(epoch));
-      if (saved && inChatRef.current && Platform.OS === 'android') Alert.alert('Saved', 'The attachment was saved to your selected folder.');
-    } catch {
-      if (inChatRef.current) Alert.alert('Unable to save', 'The export was cancelled or could not finish.');
+      const saved = await saveToVault(message, () => inChatRef.current && isChatEpochActive(epoch));
+      if (saved && inChatRef.current) Alert.alert('Saved privately', 'The file is saved privately in Whisper. Open Saved Files from Home to view it.');
+    } catch (error) {
+      if (inChatRef.current) Alert.alert('Unable to save privately', vaultError(error));
     } finally {
       externalMediaRef.current = false;
       if (inChatRef.current && AppState.currentState !== 'active') {
@@ -548,7 +566,7 @@ export default function ChatScreen({ navigation, route }) {
   };
 
   const handleLeaveFromVerify = () => {
-    Alert.alert('Leave chat?', 'This clears the conversation from this app. Exported copies cannot be recalled.', [
+    Alert.alert('Leave chat?', 'This clears the conversation from this app. Files saved privately in Whisper remain in Saved Files.', [
       { text: 'Stay', style: 'cancel' },
       {
         text: 'Leave',
@@ -582,6 +600,31 @@ export default function ChatScreen({ navigation, route }) {
   const updateProgress = (messageId) => (progress) => {
     if (!inChatRef.current || endedRef.current) return;
     setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress } : message));
+  };
+
+  const sendSavedFile = async (item) => {
+    setVaultPickerOpen(false);
+    if (!canSendMessages() || endedRef.current || !protectionReadyRef.current) {
+      Alert.alert('Cannot send', 'The chat or recipient is no longer available.'); return;
+    }
+    const messageId = createMessageId(), epoch = getChatEpoch(), controller = new AbortController();
+    vaultSends.current.set(messageId, controller);
+    const type = item.mime.startsWith('image/') ? 'image' : item.mime.startsWith('video/') ? 'video' : 'file';
+    setMessages((p) => appendBoundedMessage(p, { id: messageId, type, vaultId: item.id, fileName: item.name,
+      mimeType: item.mime, fileSize: item.size, isSent: true, ts: Date.now(), delivery: 'sending', sendStage: 'checking', progress: 0 }));
+    try {
+      await sendVaultFile(item.id, messageId, (progress, sendStage) => {
+        if (!inChatRef.current || !isChatEpochActive(epoch)) return;
+        setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress, sendStage } : message));
+      }, controller.signal);
+      updateDelivery(messageId, 'delivered');
+    } catch (error) {
+      if (inChatRef.current && isChatEpochActive(epoch)) {
+        updateDelivery(messageId, 'failed');
+        Alert.alert(controller.signal.aborted ? 'Send cancelled' : 'Saved file send status', controller.signal.aborted
+          ? 'Sending stopped. Your saved file is unchanged.' : vaultError(error));
+      }
+    } finally { vaultSends.current.delete(messageId); }
   };
 
   const doImg = async (payload) => {
@@ -631,7 +674,7 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  const confirmLeave = () => Alert.alert('Leave chat?', 'This clears the conversation from this app. Exported copies cannot be recalled.', [
+  const confirmLeave = () => Alert.alert('Leave chat?', 'This clears the conversation from this app. Files saved privately in Whisper remain in Saved Files.', [
     { text: 'Stay', style: 'cancel' },
     {
       text: 'Leave',
@@ -738,13 +781,13 @@ export default function ChatScreen({ navigation, route }) {
 
           <View style={[styles.savingRow, { borderBottomColor: colors.separator }]}>
             <View style={styles.flex}>
-              <Text style={[typography.caption, { color: colors.text }]}>Allow saving my media</Text>
+              <Text style={[typography.caption, { color: colors.text }]}>Allow saving privately in Whisper</Text>
               <Text style={[typography.micro, { color: colors.textSecondary }]}>
                 {isExpoGoFeatureTest ? 'Applies to new attachments. Native privacy checks are unavailable in this test.' : 'Applies to new attachments. Screen protection stays on.'}
               </Text>
             </View>
             <Switch value={allowSaving} onValueChange={changeSavingPolicy}
-              disabled={!canSend || changingPolicy} accessibilityLabel="Allow peer to save my new attachments" />
+              disabled={!canSend || changingPolicy} accessibilityLabel="Allow peer to save my new attachments privately in Whisper" />
           </View>
 
           {pendingDropped && !verified && (
@@ -759,7 +802,7 @@ export default function ChatScreen({ navigation, route }) {
             ref={listRef}
             data={privacyOverlayVisible || !protectionReady ? [] : messages}
             renderItem={({ item }) => <ChatBubble message={item} isSent={item.isSent}
-              onSave={saveMedia} onOpen={setViewing} mediaActive={!chatLocked && !viewing && inChatRef.current} />}
+              onSave={saveMedia} onOpen={setViewing} onCancelSend={(id) => vaultSends.current.get(id)?.abort()} mediaActive={!chatLocked && !viewing && inChatRef.current} />}
             keyExtractor={(i) => i.id}
             style={styles.list}
             contentContainerStyle={[styles.listContent, { paddingHorizontal: horizontalPadding }]}
@@ -789,6 +832,7 @@ export default function ChatScreen({ navigation, route }) {
             <MediaPickerButton
               onOpenCamera={openCamera}
               onProcessingChange={(active) => { externalMediaRef.current = active; }}
+              onOpenVault={() => setVaultPickerOpen(true)}
               onImageSelected={doImg}
               onVideoSelected={doVid}
               onFileSelected={doFile}
@@ -815,6 +859,10 @@ export default function ChatScreen({ navigation, route }) {
               scrollEnabled
               textAlignVertical="center"
               maxLength={2000}
+              autoCorrect={false}
+              spellCheck={false}
+              autoComplete="off"
+              importantForAutofill="noExcludeDescendants"
               editable={!chatLocked}
             />
             <TouchableOpacity
@@ -836,6 +884,7 @@ export default function ChatScreen({ navigation, route }) {
         </KeyboardAvoidingView>
       </ScreenContainer>
 
+      {vaultPickerOpen && !chatLocked && <VaultAttachmentPicker onSelect={sendSavedFile} onClose={() => setVaultPickerOpen(false)} />}
       {viewing && !chatLocked && inChatRef.current && <AttachmentViewer
         message={viewing} onClose={() => setViewing(null)} onSave={saveMedia} />}
       {securing && (

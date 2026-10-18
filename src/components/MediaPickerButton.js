@@ -1,11 +1,11 @@
+import { protectPrivateTemporary } from '../services/privateStorage';
+import { recordCleanup } from '../services/cleanupStatus';
 import React, { useState, useRef } from 'react';
 import { View, TouchableOpacity, Text, StyleSheet, Modal, Pressable, Alert, ActivityIndicator, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import * as ImageManipulator from 'expo-image-manipulator';
-import { cleanJpegFile, deleteAttachment } from '../services/attachmentFiles';
+import { deleteAttachment } from '../services/attachmentFiles';
 import { prepareAttachment } from '../services/prepareAttachment';
 import { cleanAbandonedCaptures } from '../services/cameraCache';
-import { cleanVideo } from '../services/documentMedia';
 import * as DocumentPicker from 'expo-document-picker';
 import { Camera } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -20,6 +20,7 @@ const OPTS = [
   { key: 'photo', icon: 'image-outline', label: 'Photo' },
   { key: 'video', icon: 'videocam-outline', label: 'Video' },
   { key: 'file', icon: 'document-text-outline', label: 'File' },
+  { key: 'vault', icon: 'lock-closed-outline', label: 'Saved Files' },
 ];
 
 
@@ -32,7 +33,7 @@ function confirmPrivacyWarning(title, message) {
   });
 }
 
-export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onOpenCamera, disabled = false }) {
+export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onOpenCamera, onOpenVault, disabled = false }) {
   const [open, setOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
@@ -44,18 +45,20 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
 
   const pick = async (key) => {
     if (isDisabled || pickingRef.current) return;
+    if (key === 'vault') { setOpen(false); onOpenVault?.(); return; }
     pickingRef.current = true;
     setIsPicking(true);
     setOpen(false);
     const epoch = getChatEpoch();
     const ownedCopies = [];
     const rememberCopy = (uri) => {
-      if (typeof uri === 'string' && FileSystem.cacheDirectory && uri.startsWith(FileSystem.cacheDirectory)) ownedCopies.push(uri);
+      if (typeof uri === 'string' && FileSystem.cacheDirectory && uri.startsWith(FileSystem.cacheDirectory)) { ownedCopies.push(uri); protectPrivateTemporary(uri); }
     };
     onProcessingChange?.(true);
     try {
+      await cleanAbandonedCaptures();
+      if (!isChatEpochActive(epoch)) return;
       if (key === 'camera') {
-        await cleanAbandonedCaptures();
         const permission = await Camera.requestCameraPermissionsAsync();
         if (!permission.granted) { Alert.alert('Camera permission', 'Allow camera access to take photos or videos.'); return; }
         if (!isChatEpochActive(epoch)) return;
@@ -65,16 +68,13 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
         if (!isChatEpochActive(epoch)) return;
         setIsProcessing(true);
         if (asset.type === 'video') {
-          const prepared = await cleanVideo(asset.uri, confirmPrivacyWarning);
+          const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'video/mp4' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
           if (!prepared) return;
           if (isChatEpochActive(epoch)) onVideoSelected({ ...prepared, mimeType: prepared.mimeType || 'video/mp4' });
           else deleteAttachment(prepared.fileUri);
         } else {
-          const resized = await ImageManipulator.manipulateAsync(asset.uri,
-            [],
-            { compress: 1, format: ImageManipulator.SaveFormat.JPEG, base64: false });
-          rememberCopy(resized.uri);
-          const prepared = cleanJpegFile(resized.uri);
+          const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'image/jpeg' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
+          if (!prepared) return;
           if (isChatEpochActive(epoch)) onImageSelected({ ...prepared, mimeType: 'image/jpeg' });
           else deleteAttachment(prepared.fileUri);
         }
@@ -94,13 +94,8 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
           if (!isChatEpochActive(epoch)) return;
           setIsProcessing(true);
           const asset = r.assets[0];
-          if (asset.width * asset.height > 50_000_000) throw new Error('Photo dimensions too large');
-          const resized = await ImageManipulator.manipulateAsync(asset.uri,
-            [],
-            { compress: 1, format: ImageManipulator.SaveFormat.JPEG, base64: false });
-          rememberCopy(resized.uri);
-          if (!isChatEpochActive(epoch)) return;
-          const prepared = cleanJpegFile(resized.uri);
+          const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'image/jpeg' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
+          if (!prepared) return;
           if (isChatEpochActive(epoch)) onImageSelected({ ...prepared, mimeType: 'image/jpeg' });
           else deleteAttachment(prepared.fileUri);
         }
@@ -115,7 +110,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
           rememberCopy(a.uri);
           if (!isChatEpochActive(epoch)) return;
           setIsProcessing(true);
-          const prepared = await cleanVideo(a.uri, confirmPrivacyWarning, a.mimeType);
+          const prepared = await prepareAttachment({ ...a, mimeType: a.mimeType || 'video/mp4' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
           if (!prepared) return;
           if (isChatEpochActive(epoch)) onVideoSelected({ ...prepared, mimeType: prepared.mimeType || 'video/mp4' });
           else deleteAttachment(prepared.fileUri);
@@ -141,7 +136,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
     } catch (err) {
       if (isChatEpochActive(epoch)) Alert.alert('Unable to attach', /^(For private sharing|Install the updated|Attachment must|Prepared attachment|PDFs are limited|Rendered PDF exceeds)/.test(err?.message || '') ? err.message : 'This file could not be prepared safely. Try a smaller file or convert it to PDF or plain text.');
     } finally {
-      await Promise.all(ownedCopies.map((uri) => FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {})));
+      await Promise.all(ownedCopies.map((uri) => FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false))));
       pickingRef.current = false;
       setIsPicking(false);
       setIsProcessing(false);
@@ -266,6 +261,7 @@ const s = StyleSheet.create({
   },
   grid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'space-evenly',
     paddingHorizontal: sp.md,
   },

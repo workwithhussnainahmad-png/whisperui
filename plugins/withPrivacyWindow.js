@@ -1,4 +1,4 @@
-const { withMainActivity, withAndroidManifest, withDangerousMod } = require('expo/config-plugins');
+const { withMainActivity, withAndroidManifest, withDangerousMod, withAppBuildGradle } = require('expo/config-plugins');
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
@@ -34,6 +34,12 @@ const touchCode = `
 `;
 
 module.exports = function withPrivacyWindow(config) {
+  config = withAppBuildGradle(config, (mod) => {
+    if (!mod.modResults.contents.includes('// Whisper release signing guard')) {
+      mod.modResults.contents += require('./releaseSigning');
+    }
+    return mod;
+  });
   config = withAndroidManifest(config, (mod) => {
     const manifest = mod.modResults.manifest;
     const permissions = manifest['uses-permission'] || [];

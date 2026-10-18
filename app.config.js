@@ -48,11 +48,18 @@ module.exports = ({ config }) => {
       android: {
         ...(options.android || {}),
         usesCleartextTraffic: false,
+        packagingOptions: {
+          ...(options.android?.packagingOptions || {}),
+          exclude: [...new Set([...(options.android?.packagingOptions?.exclude || []), '**/*.dll', '**/*.dylib'])],
+        },
       },
+      ios: { ...(options.ios || {}), useFrameworks: 'static' },
     }];
   });
   plugins.push(withTabletLandscape);
   plugins.push(require('./plugins/withPrivacyWindow'));
+  plugins.push(require('./plugins/withSignal'));
+  plugins.push(require('./plugins/withPrivateStorage'));
 
   return {
     ...config,
@@ -65,6 +72,10 @@ module.exports = ({ config }) => {
       ...(config.ios || {}),
       infoPlist: {
         ...(config.ios?.infoPlist || {}),
+        NSFaceIDUsageDescription: 'Use Face ID to unlock your private Saved Files.',
+        UIFileSharingEnabled: false,
+        UISupportsDocumentBrowser: false,
+        LSSupportsOpeningDocumentsInPlace: false,
         'UISupportedInterfaceOrientations~ipad': [
           'UIInterfaceOrientationLandscapeLeft',
           'UIInterfaceOrientationLandscapeRight',

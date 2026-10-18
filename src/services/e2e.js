@@ -1,301 +1,193 @@
-/**
- * Ephemeral X25519 + XSalsa20-Poly1305 encryption.
- *
- * Keys are generated and used in JavaScript memory because tweetnacl cannot
- * operate on non-exportable platform-keystore keys. The private key is never
- * written to storage and its byte buffer is wiped after key agreement.
- * Invite chats mix in a 256-bit client-only secret that the relay never sees.
- * This is the legacy crypto construction, not a post-quantum ratchet.
- * Random chats have no trust anchor; safety-code comparison is only meaningful
- * when users have a separate trusted channel.
- */
-import * as ExpoCrypto from 'expo-crypto';
+import * as Crypto from 'expo-crypto';
+import { requireOptionalNativeModule } from 'expo-modules-core';
+import nacl from 'tweetnacl';
+import { isValidBase64 } from './payloadValidation';
 
-if (!globalThis.crypto) globalThis.crypto = {};
-if (!globalThis.crypto.getRandomValues) {
-  globalThis.crypto.getRandomValues = (arr) => {
-    arr.set(ExpoCrypto.getRandomBytes(arr.length));
-    return arr;
-  };
-}
-
-const nacl = require('tweetnacl');
-
-function toBase64(bytes) {
-  let value = '';
-  for (let i = 0; i < bytes.length; i++) value += String.fromCharCode(bytes[i]);
-  return btoa(value);
-}
-
-function fromBase64(value) {
-  const decoded = atob(value);
-  const bytes = new Uint8Array(decoded.length);
-  for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
-  return bytes;
-}
-
-let privateKey = null;
-let sharedKey = null;
-let ourPubBase64 = null;
-let peerPubBase64 = null;
-let inviteBinding = null;
-let roomBinding = null;
-let derivationPromise = null;
-let keyEpoch = 0;
-
-export function setInviteBinding(code) {
-  inviteBinding = code ? code.toUpperCase().trim() : null;
-}
-
-export function setRoomBinding(roomId) {
-  roomBinding = typeof roomId === 'string' && roomId ? roomId : null;
-}
-
-async function deriveSessionKey(baseKey) {
-  // The full invite code contains a 256-bit client-only authentication secret.
-  // Domain separation and the room binding prevent keys from being reused
-  // across protocol versions, modes, or rooms.
-  const context = new TextEncoder().encode(
-    `whisper-session-v6|${roomBinding || 'no-room'}|${inviteBinding || 'random'}`
-  );
-  const input = new Uint8Array(baseKey.length + context.length);
-  input.set(baseKey);
-  input.set(context, baseKey.length);
-  const digest = await ExpoCrypto.digest(ExpoCrypto.CryptoDigestAlgorithm.SHA256, input);
-  const derived = new Uint8Array(digest);
-  baseKey.fill(0);
-  input.fill(0);
-  return derived;
-}
-
-export async function generateKeys() {
-  keyEpoch += 1;
-  if (privateKey) privateKey.fill(0);
-  if (sharedKey) sharedKey.fill(0);
-  const keypair = nacl.box.keyPair();
-  privateKey = keypair.secretKey;
-  ourPubBase64 = toBase64(keypair.publicKey);
-  sharedKey = null;
-  peerPubBase64 = null;
-  return ourPubBase64;
-}
-
-export function deriveSharedKey(peerPublicKeyBase64) {
-  if (sharedKey) {
-    if (peerPubBase64 !== peerPublicKeyBase64) {
-      throw new Error('E2E already established with a different peer key');
-    }
-    return Promise.resolve();
-  }
-  if (typeof peerPublicKeyBase64 !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(peerPublicKeyBase64)) {
-    return Promise.reject(new Error('Invalid peer public key'));
-  }
-  if (peerPubBase64 && peerPubBase64 !== peerPublicKeyBase64) {
-    return Promise.reject(new Error('Peer public key changed during key agreement'));
-  }
-  if (derivationPromise) return derivationPromise;
-  if (!privateKey) return Promise.reject(new Error('Private key not available'));
-
-  peerPubBase64 = peerPublicKeyBase64;
-  const epoch = keyEpoch;
-  const operation = (async () => {
-    try {
-      await completeKeyAgreement(peerPublicKeyBase64, epoch);
-    } finally {
-      if (derivationPromise === operation) derivationPromise = null;
-    }
-  })();
-  derivationPromise = operation;
-  return operation;
-}
-
-async function completeKeyAgreement(peerPublicKeyBase64, epoch) {
-
-  const peerPublicKey = fromBase64(peerPublicKeyBase64);
-  if (peerPublicKey.length !== nacl.box.publicKeyLength) throw new Error('Invalid peer public key');
-
-  let rawShared;
-  let derived;
-  try {
-    rawShared = nacl.scalarMult(privateKey, peerPublicKey);
-    if (rawShared.every((byte) => byte === 0)) {
-      throw new Error('Unsafe peer public key');
-    }
-    derived = nacl.box.before(peerPublicKey, privateKey);
-  } finally {
-    if (rawShared) rawShared.fill(0);
-    privateKey.fill(0);
-    privateKey = null;
-    peerPublicKey.fill(0);
-  }
-
-  const finalKey = await deriveSessionKey(derived);
-  if (epoch !== keyEpoch) {
-    finalKey.fill(0);
-    throw new Error('Key agreement was cancelled');
-  }
-  sharedKey = finalKey;
-}
-
-export function isReady() {
-  return sharedKey !== null;
-}
-
-export async function getSafetyCode() {
-  if (!sharedKey || !ourPubBase64 || !peerPubBase64) return null;
-  const sorted = [ourPubBase64, peerPubBase64].sort();
-  const context = new TextEncoder().encode(
-    `whisper-safety-v2|${roomBinding || 'no-room'}|${sorted[0]}|${sorted[1]}`
-  );
-  const input = new Uint8Array(sharedKey.length + context.length);
-  input.set(sharedKey);
-  input.set(context, sharedKey.length);
-  const digest = new Uint8Array(
-    await ExpoCrypto.digest(ExpoCrypto.CryptoDigestAlgorithm.SHA256, input)
-  );
-  input.fill(0);
-  const digits = [];
-  for (let i = 0; i < 15; i++) digits.push(digest[i] % 10);
-  digest.fill(0);
-  const code = digits.join('');
-  return code.match(/.{3}/g).join(' ');
-}
-
-function confirmationText(senderPublicKey, receiverPublicKey, roomId) {
-  return `whisper-key-confirm-v6|${roomId}|${senderPublicKey}|${receiverPublicKey}`;
-}
-
-export function createKeyConfirmation(roomId) {
-  if (!sharedKey || !ourPubBase64 || !peerPubBase64 || roomId !== roomBinding) {
-    throw new Error('E2E confirmation is not ready');
-  }
-  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
-  const message = new TextEncoder().encode(
-    confirmationText(ourPubBase64, peerPubBase64, roomId)
-  );
-  const cipher = nacl.secretbox(message, nonce, sharedKey);
-  const packed = new Uint8Array(nonce.length + cipher.length);
-  packed.set(nonce);
-  packed.set(cipher, nonce.length);
-  const result = toBase64(packed);
-  message.fill(0);
-  nonce.fill(0);
-  cipher.fill(0);
-  packed.fill(0);
+// Protocol 7: libsignal owns message encryption, key agreement and ratcheting.
+// The invite authenticates/encrypts ephemeral public bundles. Private protocol
+// keys stay native. There is no legacy-crypto or Expo Go fallback.
+const native = requireOptionalNativeModule('WhisperSignal');
+export const PROTOCOL_VERSION = 7;
+const MAX_BUNDLE = 16384;
+const MAX_CIPHER = 262144;
+const INVITE_RE = /^TALK-[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){16}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+let epoch = 0;
+let session = null;
+let invite = null;
+let room = null;
+let queue = Promise.resolve();
+let queuedOperations = 0;
+const bytes = (value) => new TextEncoder().encode(value);
+const decode = (value) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+const encode = (value) => {
+  let text = '';
+  for (let offset = 0; offset < value.length; offset += 16384) text += String.fromCharCode(...value.subarray(offset, offset + 16384));
+  return btoa(text);
+};
+function nativeQueue(operation, cleanup = false) {
+  if (!cleanup && queuedOperations >= 64) return Promise.reject(new Error('Too many pending crypto operations'));
+  queuedOperations += 1;
+  const result = queue.then(operation).finally(() => { queuedOperations -= 1; });
+  queue = result.catch(() => {});
   return result;
 }
-
-export function verifyKeyConfirmation(proof, roomId) {
-  if (!sharedKey || !ourPubBase64 || !peerPubBase64 || roomId !== roomBinding) return false;
-  try {
-    const packed = fromBase64(proof);
-    if (packed.length <= nacl.secretbox.nonceLength) return false;
-    const nonce = packed.slice(0, nacl.secretbox.nonceLength);
-    const cipher = packed.slice(nacl.secretbox.nonceLength);
-    const plaintext = nacl.secretbox.open(cipher, nonce, sharedKey);
-    packed.fill(0);
-    nonce.fill(0);
-    cipher.fill(0);
-    if (!plaintext) return false;
-    const actual = new TextDecoder().decode(plaintext);
-    plaintext.fill(0);
-    return actual === confirmationText(peerPubBase64, ourPubBase64, roomId);
-  } catch {
-    return false;
+function active(s) {
+  if (!s || session !== s || s.epoch !== epoch) throw new Error('Secure session ended');
+}
+function requireBridge() {
+  if (!native || native.protocolVersion !== 7 || native.libsignalVersion !== '0.105.1') {
+    throw new Error('Install the updated Whisper native build for encrypted chat');
   }
 }
-
-function messageKey(sequence, senderPublicKey, receiverPublicKey) {
-  if (!Number.isSafeInteger(sequence) || sequence < 1 ||
-      !senderPublicKey || !receiverPublicKey || !sharedKey) {
-    throw new Error('Invalid message key context');
-  }
-  const context = new TextEncoder().encode(
-    `whisper-message-v3|${roomBinding || 'no-room'}|${senderPublicKey}|${receiverPublicKey}|${sequence}`
-  );
-  const input = new Uint8Array(sharedKey.length + context.length);
-  input.set(sharedKey);
-  input.set(context, sharedKey.length);
+export function assertCryptoAvailable() { requireBridge(); }
+function bindingKey() {
+  if (!INVITE_RE.test(invite || '') || !room) throw new Error('A secret invite and room are required');
+  const input = bytes(JSON.stringify(['whisper-invite-bundle-v7', room, invite]));
   const digest = nacl.hash(input);
-  const key = digest.slice(0, nacl.secretbox.keyLength);
-  input.fill(0);
-  digest.fill(0);
+  const key = digest.slice(0, 32);
+  input.fill(0); digest.fill(0);
   return key;
 }
-
-function encodeSequence(sequence) {
-  const bytes = new Uint8Array(8);
-  let remaining = sequence;
-  for (let index = 7; index >= 0; index -= 1) {
-    bytes[index] = remaining % 256;
-    remaining = Math.floor(remaining / 256);
+function validateBundle(bundle) {
+  if (!bundle || !UUID_RE.test(bundle.address || '') ||
+      !Number.isInteger(bundle.registrationId) || bundle.registrationId < 1 || bundle.registrationId > 16380) {
+    throw new Error('Invalid peer bundle');
   }
-  return bytes;
+  for (const [name, length] of Object.entries({ identity: 33, preKey: 33, signedPreKey: 33, signature: 64, kyberKey: 1569, kyberSignature: 64 })) {
+    if (!isValidBase64(bundle[name], 4096)) throw new Error('Invalid peer bundle');
+    const value = decode(bundle[name]);
+    try { if (value.length !== length || encode(value) !== bundle[name]) throw new Error('Invalid peer bundle'); }
+    finally { value.fill(0); }
+  }
+  return bundle;
 }
-
-function decodeSequence(bytes) {
-  let value = 0;
-  for (const byte of bytes) value = value * 256 + byte;
-  return Number.isSafeInteger(value) ? value : null;
+function sealBundle(bundle, key) {
+  const nonce = Crypto.getRandomBytes(24);
+  const plain = bytes(JSON.stringify({ v: 7, room, bundle }));
+  const cipher = nacl.secretbox(plain, nonce, key);
+  const packed = new Uint8Array(1 + nonce.length + cipher.length);
+  packed[0] = 7; packed.set(nonce, 1); packed.set(cipher, 25);
+  const output = encode(packed);
+  nonce.fill(0); plain.fill(0); cipher.fill(0); packed.fill(0);
+  return output;
 }
-
-export function encrypt(plaintext, sequence) {
-  if (!sharedKey) throw new Error('E2E not ready');
-  const sequenceBytes = encodeSequence(sequence);
-  const key = messageKey(sequence, ourPubBase64, peerPubBase64);
-  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
-  const message = new TextEncoder().encode(plaintext);
-  const cipher = nacl.secretbox(message, nonce, key);
-  const packed = new Uint8Array(sequenceBytes.length + nonce.length + cipher.length);
-  packed.set(sequenceBytes);
-  packed.set(nonce, sequenceBytes.length);
-  packed.set(cipher, sequenceBytes.length + nonce.length);
-  const result = toBase64(packed);
-  message.fill(0);
-  sequenceBytes.fill(0);
-  key.fill(0);
-  nonce.fill(0);
-  cipher.fill(0);
-  packed.fill(0);
-  return result;
-}
-
-export function decrypt(packedBase64) {
-  if (!sharedKey) return null;
+function openBundle(value, key) {
+  if (!isValidBase64(value, MAX_BUNDLE)) throw new Error('Invalid peer bundle');
+  const packed = decode(value);
+  let plain;
   try {
-    const packed = fromBase64(packedBase64);
-    const sequenceLength = 8;
-    if (packed.length <= sequenceLength + nacl.secretbox.nonceLength) return null;
-    const sequenceBytes = packed.slice(0, sequenceLength);
-    const sequence = decodeSequence(sequenceBytes);
-    if (!sequence || sequence < 1) return null;
-    const key = messageKey(sequence, peerPubBase64, ourPubBase64);
-    const nonce = packed.slice(sequenceLength, sequenceLength + nacl.secretbox.nonceLength);
-    const cipher = packed.slice(sequenceLength + nacl.secretbox.nonceLength);
-    const plaintext = nacl.secretbox.open(cipher, nonce, key);
-    packed.fill(0);
-    sequenceBytes.fill(0);
-    key.fill(0);
-    nonce.fill(0);
-    cipher.fill(0);
-    if (!plaintext) return null;
-    const result = new TextDecoder().decode(plaintext);
-    plaintext.fill(0);
-    return result;
-  } catch {
-    return null;
-  }
+    if (packed.length < 42 || packed[0] !== 7 || encode(packed) !== value) throw new Error('Unsupported security protocol');
+    plain = nacl.secretbox.open(packed.subarray(25), packed.subarray(1, 25), key);
+    if (!plain) throw new Error('Invite authentication failed');
+    const body = JSON.parse(new TextDecoder().decode(plain));
+    if (body.v !== 7 || body.room !== room) throw new Error('Incorrect room or protocol');
+    return validateBundle(body.bundle);
+  } finally { packed.fill(0); plain?.fill(0); }
+}
+export function setInviteBinding(value) { invite = typeof value === 'string' ? value.toUpperCase().trim() : null; }
+export function setRoomBinding(value) { room = typeof value === 'string' && value ? value : null; }
+
+export async function generateKeys() {
+  requireBridge();
+  if (session) throw new Error('A secure session already exists');
+  const s = { id: Crypto.randomUUID(), epoch, key: bindingKey(), room, prepared: false, confirmed: false, proofSent: false };
+  session = s;
+  try {
+    s.bundle = validateBundle(JSON.parse(await nativeQueue(() => { active(s); return native.initialize(s.id); })));
+    active(s);
+    s.publicBundle = sealBundle(s.bundle, s.key);
+    return s.publicBundle;
+  } catch (error) { if (session === s) destroy(); throw error; }
 }
 
+export async function deriveSharedKey(peerBundle) {
+  const s = session;
+  active(s);
+  if (s.peerEncoded && s.peerEncoded !== peerBundle) throw new Error('Peer identity changed');
+  if (s.preparing) return s.preparing;
+  if (s.prepared) return;
+  const peer = openBundle(peerBundle, s.key);
+  if (peer.identity === s.bundle.identity || peer.address === s.bundle.address) throw new Error('Reflected peer identity');
+  s.peerEncoded = peerBundle; s.peer = peer;
+  s.initiator = s.bundle.identity < peer.identity;
+  s.preparing = nativeQueue(async () => {
+    active(s);
+    await native.establish(s.id, JSON.stringify(peer), s.initiator);
+    active(s);
+    s.prepared = true;
+    s.key.fill(0); s.key = null; invite = null;
+  });
+  return s.preparing;
+}
+
+export function isReady() { return Boolean(session?.prepared); }
+export function isConfirmed() { return Boolean(session?.confirmed && session?.proofSent); }
+function confirmation(s, sending) {
+  return JSON.stringify(['whisper-confirm-v7', s.room,
+    sending ? s.bundle.identity : s.peer.identity, sending ? s.peer.identity : s.bundle.identity]);
+}
+export async function createKeyConfirmation(roomId) {
+  const s = session;
+  return nativeQueue(async () => {
+    active(s);
+    if (!s.prepared || roomId !== s.room) throw new Error('Secure session is not ready');
+    if (s.proofSent || (!s.initiator && !s.confirmed)) return null;
+    const proof = await native.encrypt(s.id, confirmation(s, true));
+    active(s); s.proofSent = true;
+    return proof;
+  });
+}
+export async function verifyKeyConfirmation(proof, roomId) {
+  const s = session;
+  return nativeQueue(async () => {
+    active(s);
+    if (!s.prepared || roomId !== s.room || !isValidBase64(proof, MAX_BUNDLE) || s.confirmed) return false;
+    try {
+      const text = await native.decrypt(s.id, proof);
+      active(s);
+      if (text !== confirmation(s, false)) return false;
+      s.confirmed = true;
+      return true;
+    } catch { return false; }
+  });
+}
+export async function getSafetyCode() {
+  const s = session;
+  if (!isConfirmed()) return null;
+  const context = bytes(JSON.stringify(['whisper-safety-v7', s.room, ...[s.publicBundle, s.peerEncoded].sort()]));
+  const digest = nacl.hash(context);
+  const code = [...digest.subarray(0, 15)].map((byte) => byte % 10).join('').match(/.{3}/g).join(' ');
+  context.fill(0); digest.fill(0);
+  return code;
+}
+export async function encrypt(plaintext) {
+  const s = session;
+  return nativeQueue(async () => {
+    active(s);
+    if (!isConfirmed() || typeof plaintext !== 'string' || plaintext.length > 180000) throw new Error('Secure channel is unavailable');
+    const cipher = await native.encrypt(s.id, plaintext);
+    active(s);
+    if (!isValidBase64(cipher, MAX_CIPHER)) throw new Error('Invalid encrypted payload');
+    return cipher;
+  });
+}
+export async function decrypt(ciphertext) {
+  const s = session;
+  return nativeQueue(async () => {
+    active(s);
+    if (!isConfirmed() || !isValidBase64(ciphertext, MAX_CIPHER)) throw new Error('Message authentication failed');
+    try {
+      const text = await native.decrypt(s.id, ciphertext);
+      active(s);
+      return text;
+    } catch { throw new Error('Message authentication failed or replayed'); }
+  });
+}
 export function destroy() {
-  keyEpoch += 1;
-  if (privateKey) privateKey.fill(0);
-  if (sharedKey) sharedKey.fill(0);
-  privateKey = null;
-  sharedKey = null;
-  ourPubBase64 = null;
-  peerPubBase64 = null;
-  inviteBinding = null;
-  roomBinding = null;
-  derivationPromise = null;
+  epoch += 1;
+  const old = session;
+  session = null; invite = null; room = null;
+  old?.key?.fill(0);
+  if (old && native) nativeQueue(() => native.destroy(old.id), true).catch(() => {});
 }

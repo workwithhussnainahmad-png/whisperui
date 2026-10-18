@@ -1,8 +1,7 @@
 package com.whisper.privacy
 
-import android.app.Activity
-import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.media.MediaCodec
@@ -11,23 +10,23 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
-import android.provider.DocumentsContract
 import android.util.Base64
-import expo.modules.kotlin.Promise
-import expo.modules.kotlin.exception.toCodedException
-import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 
-private const val SAVE_CODE = 53127
 private const val MAX_BYTES = 3_000_000
 
 class WhisperAttachmentsModule : Module() {
-  private var savePromise: Promise? = null
-  @Volatile private var exportUri: Uri? = null
+  private var cleanupFailures = 0
+  private fun removeTemporary(file: File) {
+    if (file.exists() && !file.delete()) {
+      cleanupFailures++
+      android.util.Log.w("WhisperCleanup", "native-temp failure count=$cleanupFailures")
+    }
+  }
   private val context get() = requireNotNull(appContext.reactContext)
   private fun decode(value: String): ByteArray {
     require(value.length <= 4_000_256) { "Attachment too large" }
@@ -37,76 +36,59 @@ class WhisperAttachmentsModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("WhisperAttachments")
-    AsyncFunction("cleanTemporaryFiles") {
-      context.cacheDir.listFiles()?.filter { it.name.startsWith("whisper-private-") }?.forEach { it.delete() }
-    }
-
-    AsyncFunction("chooseSaveFile") { name: String, mime: String, promise: Promise ->
-      check(savePromise == null && exportUri == null) { "Export already in progress" }
-      require(name.matches(Regex("[A-Za-z0-9._-]{1,100}")))
-      require(mime.matches(Regex("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+")))
-      savePromise = promise
-      try {
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-          addCategory(Intent.CATEGORY_OPENABLE)
-          type = mime
-          putExtra(Intent.EXTRA_TITLE, name)
-        }
-        appContext.throwingActivity.startActivityForResult(intent, SAVE_CODE)
-      } catch (error: Exception) {
-        savePromise = null
-        promise.reject(error.toCodedException())
-      }
-    }.runOnQueue(Queues.MAIN)
-
-    OnActivityResult { _, (requestCode, resultCode, intent) ->
-      if (requestCode == SAVE_CODE) {
-        val promise = savePromise
-        savePromise = null
-        val uri = if (resultCode == Activity.RESULT_OK) intent?.data else null
-        if (promise != null) {
-          exportUri = uri
-          promise.resolve(uri?.toString())
-        }
-      }
-    }
-
-    AsyncFunction("writeChosenFile") { uriString: String, base64: String ->
-      val uri = requireNotNull(exportUri)
-      check(uri.toString() == uriString) { "Export destination expired" }
-      val bytes = decode(base64)
-      try {
-        requireNotNull(context.contentResolver.openOutputStream(uri, "wt")).use { stream ->
-          var offset = 0
-          while (offset < bytes.size) {
-            val count = minOf(65536, bytes.size - offset)
-            stream.write(bytes, offset, count)
-            offset += count
+    AsyncFunction("privacySelfCheck") {
+      check((context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) { "Debug builds only" }
+      val info = context.applicationInfo
+      var fullBackup = 0
+      var extraction = 0
+      context.assets.openXmlResourceParser("AndroidManifest.xml").use { parser ->
+        while (parser.eventType != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+          if (parser.eventType == org.xmlpull.v1.XmlPullParser.START_TAG && parser.name == "application") {
+            fullBackup = parser.getAttributeResourceValue("http://schemas.android.com/apk/res/android", "fullBackupContent", 0)
+            extraction = parser.getAttributeResourceValue("http://schemas.android.com/apk/res/android", "dataExtractionRules", 0)
           }
-          stream.flush()
-        }
-        true
-      } finally { bytes.fill(0) }
-    }
-
-    AsyncFunction("copyChosenFile") { uriString: String, sourceUri: String ->
-      val uri = requireNotNull(exportUri)
-      check(uri.toString() == uriString)
-      val source = File(requireNotNull(Uri.parse(sourceUri).path)).canonicalFile
-      require(source.path.startsWith(context.cacheDir.canonicalPath + File.separator))
-      source.inputStream().use { input ->
-        requireNotNull(context.contentResolver.openOutputStream(uri, "wt")).use { output ->
-          input.copyTo(output, 98304)
-          output.flush()
+          parser.next()
         }
       }
+      val vault = File(context.noBackupFilesDir, "vault").canonicalFile
+      fun exposed(authority: String, file: File): Boolean = try {
+        androidx.core.content.FileProvider.getUriForFile(context, context.packageName + authority, file)
+        true
+      } catch (_: IllegalArgumentException) { false }
+      val authorities = listOf(".SharingFileProvider", ".FileSystemFileProvider", ".ImagePickerFileProvider")
+      val privateBlocked = authorities.all { authority ->
+        !exposed(authority, File(vault, "probe.box")) &&
+        !exposed(authority, File(context.cacheDir, "whisper-chat-media/probe.png")) &&
+        !exposed(authority, File(context.filesDir, "probe"))
+      }
+      mapOf(
+        "fileProvidersBlockPrivateStorage" to privateBlocked,
+        "qrDirectoryShareable" to exposed(".SharingFileProvider", File(context.cacheDir, "whisper-share/probe.png")),
+        "allowBackup" to (info.flags and android.content.pm.ApplicationInfo.FLAG_ALLOW_BACKUP != 0),
+        "fullBackupContentLinked" to (fullBackup != 0 && fullBackup == context.resources.getIdentifier("whisper_backup_rules", "xml", context.packageName)),
+        "dataExtractionRulesLinked" to (extraction != 0 && extraction == context.resources.getIdentifier("whisper_extraction_rules", "xml", context.packageName)),
+        "nativeCleanupFailures" to cleanupFailures,
+        "vaultUnderNoBackupFilesDir" to (vault.parentFile == context.noBackupFilesDir.canonicalFile),
+        "potentialPlaintextTempFiles" to context.cacheDir.walkTopDown().count { it.isFile && it.extension != "wenc" }
+      )
+    }
+    AsyncFunction("validateImageFile") { uriString: String ->
+      val uri = Uri.parse(uriString)
+      require(uri.scheme == "file")
+      val file = File(requireNotNull(uri.path)).canonicalFile
+      require(file.path.startsWith(context.cacheDir.canonicalPath + File.separator))
+      require(file.length() in 1..(64L * 1024 * 1024))
+      val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+      BitmapFactory.decodeFile(file.path, options)
+      // Restrict previews to non-animated JPEG/PNG; other formats can be
+      // stored privately without automatic decoding.
+      require(options.outMimeType in setOf("image/jpeg", "image/png"))
+      require(options.outWidth in 1..8192 && options.outHeight in 1..8192)
+      require(options.outWidth.toLong() * options.outHeight <= 16_000_000)
       true
     }
-
-    AsyncFunction("finishExport") { keep: Boolean ->
-      val uri = exportUri
-      exportUri = null
-      if (!keep && uri != null) DocumentsContract.deleteDocument(context.contentResolver, uri)
+    AsyncFunction("cleanTemporaryFiles") {
+      (context.cacheDir.listFiles() ?: error("Cannot inspect temporary storage")).filter { it.name.startsWith("whisper-private-") }.forEach { check(it.delete()) { "Native temporary cleanup failed" } }
     }
 
     AsyncFunction("renderPdfPage") { base64: String, index: Int ->
@@ -117,7 +99,7 @@ class WhisperAttachmentsModule : Module() {
         bytes.fill(0)
         val descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         // The renderer owns this descriptor. Unlink immediately; no cached PDF.
-        file.delete()
+        removeTemporary(file)
         descriptor.use { ownedDescriptor -> PdfRenderer(ownedDescriptor).use { renderer ->
           require(renderer.pageCount in 1..100 && index in 0 until renderer.pageCount)
           renderer.openPage(index).use { page ->
@@ -133,7 +115,7 @@ class WhisperAttachmentsModule : Module() {
             } finally { bitmap.recycle() }
           }
         } }
-      } finally { bytes.fill(0); file.delete() }
+      } finally { bytes.fill(0); removeTemporary(file) }
     }
 
     AsyncFunction("cleanVideoFile") { inputUri: String ->
@@ -197,7 +179,7 @@ class WhisperAttachmentsModule : Module() {
         if (started) runCatching { muxer?.stop() }
         runCatching { muxer?.release() }
         extractor.release()
-        if (!retained) output.delete()
+        if (!retained) removeTemporary(output)
       }
     }
   }

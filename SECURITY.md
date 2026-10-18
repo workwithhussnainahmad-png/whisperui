@@ -1,105 +1,68 @@
 # Security policy
 
+> Phase 1 saved-file update: [PRIVATE_VAULT_PHASE1.md](PRIVATE_VAULT_PHASE1.md)
+> supersedes attachment-export descriptions below. Save now persists encrypted
+> files privately; invite QR sharing is unchanged. Native device verification
+> remains pending.
+
+
+Current source status (October 18, 2026): protocol 7, mandatory secret invites,
+native libsignal messaging, and encrypted ephemeral attachment caching. See
+[protocol and release gates](SECURITY_PROTOCOL.md) for the design and
+[hardening results](SECURITY_HARDENING.md) for validation. These changes are local
+source changes, not a deployed or independently audited security guarantee.
+
 ## Reporting
 
 Use GitHub private vulnerability reporting for this repository. Never attach
 production secrets, signing keys, private conversations, or real user data.
 
-## Implementation status
+## Security boundaries
 
-Development and release builds connect directly over HTTPS to
-`https://mywhisperchat.duckdns.org` by default, as requested for the deployed
-server. `EXPO_PUBLIC_SERVER_URL` can override the HTTPS origin at build time.
-Direct connections expose the device IP to the destination; native Tor transport
-is unfinished. This deployment does not provide IP anonymity.
-
-The following describe intended behavior of the current source, not verified
-guarantees. No tests or native builds were run for this implementation pass.
-
-- Production networking requires HTTPS and Android trusts system certificate
-  authorities only.
-- One-to-one payloads use authenticated X25519-derived session keys and a
-  distinct direction- and sequence-bound encryption key per message.
+- Updated native builds and a protocol 7 relay are required together. Missing or
+  mismatched native encryption bridges fail closed; Expo Go cannot chat.
+- The mobile client requires secret invites and disables random/public groups.
+  Keep `ALLOW_UNVERIFIED_CHATS=false` on the backend.
+- libsignal owns ephemeral session agreement and message ratcheting. Whisper's
+  invite authentication, native integration and lifecycle require independent
+  review. Protocol keys and text conversations are held in memory.
+- Completed attachment caches contain authenticated ciphertext with ephemeral
+  per-file keys. Camera, preparation, explicit preview and export can still use
+  private temporary plaintext files. Cleanup is not forensic erasure. Explicit
+  exported copies remain outside the chat lifecycle.
+- Images/videos require a tap to preview. Native JPEG/PNG image validation caps
+  dimensions at 8192 per axis and 16 million pixels. File transfers are limited
+  to 64 MiB per file and 256 MiB per direction per chat, with a 64 MiB storage
+  reserve, two concurrent transfers and four chunks in flight.
+- Production networking requires HTTPS. Direct connections expose IP, timing
+  and traffic volume to infrastructure; native Tor transport is unfinished.
+  `EXPO_PUBLIC_SERVER_URL` selects the HTTPS origin at build time.
 - Authenticated peer receipts distinguish relay acceptance from peer receipt.
-- Encryption keys and text conversations are held in memory. Chunked media is
-  staged and received in private temporary plaintext files on the device, not
-  Photos/Gallery or shared storage; chat teardown and startup clean these files. Explicitly authorized
-  media exports create files. Native attachment preparation also uses private
-  temporary files, deleted on completion and cleaned on initialization after an
-  interrupted run; this is not a forensic-erasure guarantee. App-owned temporary files are cleaned up, but
-  recipient copies cannot be recalled or controlled cryptographically.
-- Group chat is public and is not presented as end-to-end encrypted.
+  Peer liveness expires after a provisional 35 seconds without an authenticated
+  response; network partitions prevent instantaneous remote shutdown.
 
-Protocol v6 retains room binding and encrypted control messages and adds bounded
-encrypted attachment chunks with a 256-sequence replay window. Both clients and
-server must be upgraded together. The current custom
-X25519/XSalsa20 protocol is NOT post-quantum and has NO forward-secret message
-ratchet. A reviewed replacement is still required. Old invites/clients are
-incompatible with this version.
+Android secure windows/overlay restrictions and the iOS privacy cover require
+installed-build verification. iOS screenshot prevention for arbitrary UI is not
+an Apple-supported guarantee. Saving permission is independent in each direction
+and never disables capture protection. Certificate pinning and platform
+attestation require production lifecycle controls and credentials; placeholder
+pins or unverified tokens must not be enabled.
 
-Android secure windows and overlay restrictions, and an iOS native privacy
-cover with Expo capture protection, require native builds and device testing.
-iOS screenshot prevention for arbitrary UI is not an Apple-supported guarantee.
-Recorder detection cannot identify every third-party recorder or external camera.
+## Build and release status
 
-Saving permission is independent in each direction and applies to future media.
-It never disables capture protection. Peer liveness currently expires after a
-provisional 35 seconds without an authenticated response; remote shutdown cannot
-be instantaneous during a network partition.
+Local automated tests exercise the real pinned libsignal Node/Rust library,
+encrypted cache and client/relay exchange. Android/iOS JavaScript exports pass.
+Neither result compiles or verifies the Kotlin/Swift bridges. Native builds,
+cross-platform device tests, cache/network inspection and independent security
+review remain release requirements.
 
-Certificate pinning, Play Integrity, and Apple App Attest require production
-certificate lifecycle control and platform credentials. They must not be
-enabled with placeholder pins or unverified tokens.
+EAS generates native projects from Expo config because `.easignore` excludes
+`android/` and `ios/`. Keep changes in config plugins as well as retained local
+Android sources. The manual native-build workflow provides compile checks
+without publishing; it has not been run remotely.
 
-The protocol has not received an independent professional cryptographic audit.
-
-## Native build configuration (October 15, 2026)
-
-EAS builds exclude `/android/` and `/ios/` through `.easignore` and generate
-native projects from Expo config. Existing local Android sources are retained;
-`.gitignore` does not untrack previously committed files. Apply native changes
-through config plugins so EAS receives them. The privacy plugin recreates secure
-window/overlay/audio restrictions and system-only certificate trust settings.
-Playback now uses expo-video with caching, background playback, native controls,
-fullscreen and picture-in-picture disabled.
-
-`npx expo-doctor@latest` passed 21/21 checks after these changes. Only the local
-`whisper-privacy` module is excluded from React Native Directory validation,
-because it is private source in this repository, not a published directory entry.
-This diagnostic result is not native-build, playback or security verification.
-
-## Large attachment transfers
-
-Protocol 6 removes the 3 MB total media-transfer limit. The sender reads 96 KiB
-chunks from private files; the receiver writes chunks incrementally and sends
-encrypted per-chunk acknowledgements. Each transfer permits four chunks in flight
-and at most two concurrent attachments per device. A stalled incoming transfer
-expires after 60 seconds without a chunk. Storage exhaustion, chat expiry, session
-closure and connectivity loss can still stop a transfer; there is no unlimited
-storage or successful-delivery guarantee. Device storage keeps a 16 MiB reserve.
-
-Both clients and the backend require protocol 6. Updated native builds are needed
-for file-based video remux and streamed Android export. The relay keeps bounded
-packet queues only, with per-second count/byte rate limits and retry responses.
-It does not store attachment files or plaintext.
-
-Document conversion and preview retain separate parser/resource limits. Larger
-or unsupported documents can be sent unchanged after explicit confirmation that
-original metadata/embedded content will be included. Encryption does not remove
-that metadata. Camera recording no longer has the previous 30-second/2.8 MB stop.
-
-## Expo Go development feature-test mode
-
-Development JavaScript running in Expo Go can exercise matching, invites, E2EE,
-photos and chunked file transfer without the custom WhisperPrivacy bridge.
-Available Expo capture protection is attempted. A persistent chat banner and an
-encrypted notice to the peer identify the feature-test session. Missing native
-protection never receives a successful security-verification claim from this mode.
-An installed app with a missing/failing native privacy module still fails closed,
-and release JavaScript cannot select the fallback.
-
-Expo Go cannot validate our custom recording-state detection, native privacy
-covers, Android window plugins, native video metadata removal or PDF renderer.
-Original video/audio can be sent for testing only after explicit metadata consent;
-PDF originals follow the existing metadata-consent flow. Native PDF previews are
-unavailable. Full security acceptance testing still requires installed builds.
+libsignal is AGPL-3.0-only and unsupported upstream for third-party use. Whisper
+has not been relicensed. Resolve licensing/source obligations before distribution.
+Remaining upstream dependency advisories are recorded in SECURITY_HARDENING.md;
+the audit gate must remain enabled. No application can promise immunity from
+every attack.

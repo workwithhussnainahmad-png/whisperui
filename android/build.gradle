@@ -22,3 +22,13 @@ allprojects {
 
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"
+
+// Whisper libsignal repository
+allprojects {
+  repositories {
+    maven {
+      url 'https://build-artifacts.signal.org/libraries/maven/'
+      content { includeGroup 'org.signal' }
+    }
+  }
+}

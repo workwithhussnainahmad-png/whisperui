@@ -1,8 +1,11 @@
+import { protectPrivateTemporary } from './privateStorage';
+import { recordCleanup } from './cleanupStatus';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Image } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { cleanVideo, rebuildPdf, officeText, isOffice, encodeBytes, hasNativeDocumentTools } from './documentMedia';
-import { cleanJpegFile, stageAttachment, newAttachmentFile, decodeChunk, deleteAttachment, mediaExtension } from './attachmentFiles';
+import { cleanJpegFile, stageAttachment, newEncryptedAttachmentFile, finishEncryptedAttachment, decodeChunk, deleteAttachment } from './attachmentFiles';
+import { validateAttachmentSize } from './mediaLimits';
 
 export async function prepareAttachment(asset, isActive, confirmConversion) {
   const mime = asset.mimeType || 'application/octet-stream';
@@ -10,6 +13,7 @@ export async function prepareAttachment(asset, isActive, confirmConversion) {
   let outputMime = mime;
   let name = 'Whisperchat.txt';
   const size = asset.size || asset.fileSize || (await FileSystem.getInfoAsync(asset.uri)).size;
+  validateAttachmentSize(size);
   if (!isActive()) throw new Error('Chat ended');
   if (/^(video|audio)\//.test(mime)) {
     data = await cleanVideo(asset.uri, confirmConversion, mime);
@@ -24,10 +28,11 @@ export async function prepareAttachment(asset, isActive, confirmConversion) {
     try {
       converted = await ImageManipulator.manipulateAsync(asset.uri, [],
         { compress: 1, format: ImageManipulator.SaveFormat.JPEG, base64: false });
+      protectPrivateTemporary(converted.uri);
       data = cleanJpegFile(converted.uri);
       outputMime = 'image/jpeg'; name = 'Whisperchat.jpg';
     } finally {
-      if (converted?.uri) await FileSystem.deleteAsync(converted.uri, { idempotent: true }).catch(() => {});
+      if (converted?.uri) await FileSystem.deleteAsync(converted.uri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false));
     }
   } else if ((mime === 'application/pdf' || /\.pdf$/i.test(asset.name || '')) && size <= 3_000_000 && hasNativeDocumentTools()) {
     if (!(await confirmConversion('PDF privacy', 'Send a flattened PDF? Visible pages are preserved, but selectable text, forms, links, signatures, attachments, and original metadata are removed.'))) return null;
@@ -49,10 +54,18 @@ export async function prepareAttachment(asset, isActive, confirmConversion) {
     name = `Whisperchat.${extension}`;
   }
   if (typeof data === 'string') {
-    const file = newAttachmentFile(mediaExtension(outputMime));
-    file.write(decodeChunk(data));
-    data = { fileUri: file.uri, fileSize: file.size };
+    const file = newEncryptedAttachmentFile();
+    const bytes = decodeChunk(data);
+    let writer;
+    try {
+      writer = file.open();
+      for (let offset = 0; offset < bytes.length; offset += 98304) writer.writeBytes(bytes.subarray(offset, offset + 98304));
+      data = finishEncryptedAttachment(file.uri);
+    } catch (error) { deleteAttachment(file.uri); throw error; }
+    finally { writer?.close(); bytes.fill(0); }
   }
+  if (!isActive()) { deleteAttachment(data.fileUri); throw new Error('Chat ended'); }
+  data = await stageAttachment(data.fileUri);
   if (!isActive()) { deleteAttachment(data.fileUri); throw new Error('Chat ended'); }
   return { ...data, mimeType: outputMime, fileName: name };
 }

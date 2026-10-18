@@ -6,19 +6,22 @@ import { io } from 'socket.io-client';
 import * as ExpoCrypto from 'expo-crypto';
 import {
   generateKeys,
+  assertCryptoAvailable,
   encrypt,
   decrypt,
   destroy as destroyE2E,
   isReady,
+  isConfirmed,
   setInviteBinding,
   setRoomBinding,
 } from './e2e';
-import { File } from 'expo-file-system';
-import { isOwnedAttachment, encodeChunk } from './attachmentFiles';
-import { getServerUrl } from '../config';
+import { isOwnedAttachment, openAttachmentFile, encodeChunk } from './attachmentFiles';
+import { getServerUrl, ALLOW_UNVERIFIED_CHATS } from '../config';
 import { ensureCaptureProtection } from './captureProtection';
 import { isValidBase64, base64ByteLength } from './payloadValidation';
-import { CHUNK_BYTES, CHUNK_CHARS, acceptMediaChunk, clearMediaTransfers } from './mediaTransfer';
+import { openVaultSend } from './privateVault';
+import { CHUNK_BYTES, CHUNK_CHARS, acceptMediaChunk, clearMediaTransfers, abortMediaTransfer, commitMediaTransfer } from './mediaTransfer';
+import { MAX_ATTACHMENT_BYTES, MAX_CHAT_MEDIA_BYTES, validateAttachmentSize } from './mediaLimits';
 import {
   MAX_RECONNECT_ATTEMPTS,
   RECONNECT_WINDOW_MS,
@@ -29,9 +32,9 @@ import {
 
 export { MAX_RECONNECT_ATTEMPTS, RECONNECT_WINDOW_MS } from './reconnectPolicy';
 
-const MAX_RECEIVED_ENCRYPTED_CHARS = 5_592_408;
+const MAX_RECEIVED_ENCRYPTED_CHARS = 262_144;
+const MAX_QUEUED_ENCRYPTED_CHARS = 2 * 1024 * 1024;
 const MAX_INLINE_MEDIA_BASE64_CHARS = 4_000_000;
-const MAX_INLINE_MEDIA_BYTES = 3_000_000;
 const INVITE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const FULL_INVITE_RE = /^TALK-[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){16}$/;
 const BARE_INVITE_RE = /^[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){16}$/;
@@ -58,6 +61,7 @@ let pendingInviteRequest = null;
 const pendingRequests = new Set();
 const chunkWaiters = new Map();
 const activeMediaSends = new Set();
+let sentMediaBudget = 0;
 
 export function getChatEpoch() { return sessionEpoch; }
 export function isChatEpochActive(epoch) {
@@ -66,6 +70,9 @@ export function isChatEpochActive(epoch) {
 
 export function configureChatSecurity({ inviteCode, chatMode, roomId } = {}) {
   resetE2E();
+  if (chatMode !== 'invite' || !isValidInviteCode(inviteCode)) {
+    throw new Error('A valid private invite is required');
+  }
   if (socket?.data) socket.data.pendingMatch = null;
   activeRoomId = typeof roomId === 'string' ? roomId : null;
   setInviteBinding(chatMode === 'invite' && inviteCode ? inviteCode : null);
@@ -163,6 +170,7 @@ function waitForSession(target, timeoutMs) {
 }
 
 export function connectSocket() {
+  assertCryptoAvailable();
   if (socket?.data?.localClosing) socket.disconnect();
   if (socket?.connected && socket.data?.sessionReady) return Promise.resolve(socket);
   if (connectPromise) return connectPromise;
@@ -226,6 +234,7 @@ export function disconnectSocket() {
 }
 
 export async function findRandom() {
+  if (!ALLOW_UNVERIFIED_CHATS) throw new Error('Use a private invite. Random chat is disabled.');
   await ensureCaptureProtection();
   if (!socket?.connected) throw new Error('Not connected');
   const response = await emitWithAck('find-random', {}, 7000);
@@ -234,6 +243,7 @@ export async function findRandom() {
 }
 
 export async function getGroupCaptcha() {
+  if (!ALLOW_UNVERIFIED_CHATS) throw new Error('Public group chat is disabled.');
   if (!socket?.connected) throw new Error('Not connected');
   const response = await emitWithAck('group-captcha', {}, 5000);
   if (!response?.ok || !response.captcha?.id || !response.captcha?.question) {
@@ -254,6 +264,7 @@ export async function getGroupStatus() {
 export async function joinGroupChat(
   username, captchaId, captchaAnswer, captchaIndex = 0, powSolution
 ) {
+  if (!ALLOW_UNVERIFIED_CHATS) throw new Error('Public group chat is disabled.');
   if (!socket?.connected) throw new Error('Not connected');
   resetE2E();
   const response = await emitWithAck('join-group', {
@@ -377,7 +388,7 @@ export async function startKeyExchange() {
   const epoch = sessionEpoch;
   const publicKey = await ensureKeypair();
   if (!isChatEpochActive(epoch) || !socket?.connected) return;
-  socket.emit('key-exchange', { publicKey, protocolVersion: 6 });
+  socket.emit('key-exchange', { keyBundle: publicKey, protocolVersion: 7 });
 }
 
 export function isE2EReady() {
@@ -385,12 +396,12 @@ export function isE2EReady() {
 }
 
 export function canSendMessages() {
-  return activeRoomId !== null && socket?.connected && isReady() && chatVerified;
+  return activeRoomId !== null && socket?.connected && isConfirmed() && chatVerified;
 }
 
 export function confirmSecureChannel() {
   const epoch = sessionEpoch;
-  if (!socket?.connected || !isReady()) {
+  if (!socket?.connected || !isConfirmed()) {
     return Promise.reject(new Error('Secure channel is not ready'));
   }
 
@@ -430,6 +441,7 @@ export function confirmSecureChannel() {
 export const verifyChat = confirmSecureChannel;
 
 export function resetE2E() {
+  sentMediaBudget = 0;
   clearMediaTransfers();
   for (const waiter of chunkWaiters.values()) waiter.reject(new Error('Chat ended'));
   chunkWaiters.clear();
@@ -461,47 +473,41 @@ function validateMessageBody(body) {
       Number.isInteger(body.index) && body.index >= 0 && body.index < body.count &&
       isValidBase64(body.data, CHUNK_CHARS) &&
       (body.index === body.count - 1 || body.data.length === CHUNK_CHARS) &&
-      d && ['image', 'video', 'file'].includes(d.type) && typeof d.allowSaving === 'boolean' &&
+      d && (d.commitRequired === undefined || d.commitRequired === true) && ['image', 'video', 'file'].includes(d.type) && typeof d.allowSaving === 'boolean' &&
       typeof d.mimeType === 'string' && SAFE_MIME_RE.test(d.mimeType) &&
       typeof d.fileName === 'string' && d.fileName.length <= 255 &&
-      Number.isSafeInteger(d.fileSize) && d.fileSize > 0 &&
+      !/[\u0000-\u001F\u007F\u202A-\u202E\u2066-\u2069]/.test(d.fileName) &&
+      (d.type !== 'image' || IMAGE_MIME_TYPES.has(d.mimeType)) &&
+      (d.type !== 'video' || VIDEO_MIME_TYPES.has(d.mimeType)) &&
+      Number.isSafeInteger(d.fileSize) && d.fileSize > 0 && d.fileSize <= MAX_ATTACHMENT_BYTES &&
       body.count === Math.ceil(d.fileSize / CHUNK_BYTES);
   }
   if (body.type === 'media-chunk-ack') return MESSAGE_ID_RE.test(body.transferId || '') && Number.isSafeInteger(body.index) && body.index >= 0;
+  if (body.type === 'media-complete' || body.type === 'media-complete-ack') return MESSAGE_ID_RE.test(body.transferId || '');
   if (body.type === 'media-transfer-error') return MESSAGE_ID_RE.test(body.transferId || '');
-  if (body.type === 'media-policy') return typeof body.allowSaving === 'boolean';
+  if (body.type === 'media-policy') return typeof body.allowSaving === 'boolean' &&
+    (body.capabilityId === undefined || (MESSAGE_ID_RE.test(body.capabilityId) && body.vaultTransferVersion === 1 && typeof body.capabilityReply === 'boolean'));
   if (body.type === 'typing') return typeof body.active === 'boolean';
   if (body.type === 'security-notice') return ['screenshot', 'recording', 'overlay'].includes(body.event);
   if (body.type === 'session-close') return body.reason === 'left';
   if (body.type === 'heartbeat' || body.type === 'heartbeat-response') return MESSAGE_ID_RE.test(body.challenge || '');
   if (body.type === 'text') return typeof body.text === 'string' && body.text.length <= 2000;
-  if (!['image', 'video', 'file'].includes(body.type)) return false;
-
-  const dataField = body.type === 'image' ? 'imageData' : body.type === 'video' ? 'videoData' : 'fileData';
-  if (!isValidBase64(body[dataField], MAX_INLINE_MEDIA_BASE64_CHARS)) return false;
-  if (typeof body.allowSaving !== 'boolean') return false;
-  const byteLength = base64ByteLength(body[dataField]);
-  if (byteLength > MAX_INLINE_MEDIA_BYTES) return false;
-  if (typeof body.mimeType !== 'string' || !SAFE_MIME_RE.test(body.mimeType)) return false;
-  if (body.type === 'image' && !IMAGE_MIME_TYPES.has(body.mimeType)) return false;
-  if (body.type === 'video' && !VIDEO_MIME_TYPES.has(body.mimeType)) return false;
-  if (body.type === 'file') {
-    if (typeof body.fileName !== 'string' || body.fileName.length < 1 || body.fileName.length > 255) return false;
-    if (/[\u0000-\u001F\u007F\u202A-\u202E\u2066-\u2069]/.test(body.fileName)) return false;
-    if (!Number.isInteger(body.fileSize) || body.fileSize !== byteLength) return false;
-  }
-  return true;
+  // Media must pass through the bounded, encrypted attachment cache. Legacy
+  // inline media would retain plaintext base64 in the conversation state.
+  return false;
 }
 
-export function decryptIncoming(encrypted, expectedMessageId) {
+export async function decryptIncoming(encrypted, expectedMessageId) {
   if (!isValidBase64(encrypted, MAX_RECEIVED_ENCRYPTED_CHARS)) {
     throw new Error('Invalid encrypted payload');
   }
-  const plaintext = decrypt(encrypted);
+  const epoch = sessionEpoch;
+  const plaintext = await decrypt(encrypted);
+  if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
   if (typeof plaintext !== 'string') throw new Error('Message authentication failed');
 
   const envelope = JSON.parse(plaintext);
-  if (envelope?.v !== 6 || envelope.roomId !== activeRoomId ||
+  if (envelope?.v !== 7 || envelope.roomId !== activeRoomId ||
       !Number.isSafeInteger(envelope.seq) || envelope.seq < 1 ||
       envelope.seq <= receiveSequence - 256 || receivedSequences.has(envelope.seq)) {
     throw new Error('Replayed or invalid message');
@@ -513,6 +519,27 @@ export function decryptIncoming(encrypted, expectedMessageId) {
   receivedSequences.add(envelope.seq);
   for (const sequence of receivedSequences) {
     if (sequence <= receiveSequence - 256) receivedSequences.delete(sequence);
+  }
+  if (envelope.body.type === 'media-policy' && envelope.body.capabilityId) {
+    const control = envelope.body;
+    if (control.capabilityReply) chunkWaiters.get(`${control.capabilityId}:capability`)?.resolve();
+    else sendEncrypted({ type: 'media-policy', allowSaving: allowSavingMyMedia, vaultTransferVersion: 1,
+      capabilityId: control.capabilityId, capabilityReply: true }).catch(() => {});
+    return null;
+  }
+  if (envelope.body.type === 'media-complete-ack') {
+    chunkWaiters.get(`${envelope.body.transferId}:complete`)?.resolve(); return null;
+  }
+  if (envelope.body.type === 'media-complete') {
+    try {
+      const result = commitMediaTransfer(envelope.body.transferId);
+      sendEncrypted({ type: 'media-complete-ack', transferId: envelope.body.transferId }).catch(() => {});
+      return result;
+    } catch {
+      abortMediaTransfer(envelope.body.transferId);
+      sendEncrypted({ type: 'media-transfer-error', transferId: envelope.body.transferId }).catch(() => {});
+      return null;
+    }
   }
   if (envelope.body.type === 'media-chunk') {
     const chunk = envelope.body;
@@ -530,6 +557,9 @@ export function decryptIncoming(encrypted, expectedMessageId) {
     return null;
   }
   if (envelope.body.type === 'media-transfer-error') {
+    if (envelope.body.abortAck === true) { chunkWaiters.get(`${envelope.body.transferId}:abort`)?.resolve(); return null; }
+    abortMediaTransfer(envelope.body.transferId);
+    if (envelope.body.abortRequest === true) sendEncrypted({ type: 'media-transfer-error', transferId: envelope.body.transferId, abortAck: true }).catch(() => {});
     for (const [key, waiter] of chunkWaiters) {
       if (key.startsWith(`${envelope.body.transferId}:`)) waiter.reject(new Error('Recipient could not receive the attachment'));
     }
@@ -542,19 +572,22 @@ export function createMessageId() {
   return ExpoCrypto.randomUUID();
 }
 
-async function sendEncrypted(body, messageId = createMessageId()) {
+async function sendEncrypted(body, messageId = createMessageId(), active = () => true) {
+  if (!active()) throw new Error('Send cancelled or chat ended.');
   const finalBody = { ...body, messageId };
   if (!socket?.connected || !canSendMessages() || !validateMessageBody(finalBody)) {
     throw new Error('Message is invalid or the secure channel is unavailable');
   }
-  if (queuedMessages >= 24 || queuedCharacters >= MAX_RECEIVED_ENCRYPTED_CHARS) {
+  if (queuedMessages >= 24 || queuedCharacters >= MAX_QUEUED_ENCRYPTED_CHARS) {
     throw new Error('Wait for the current messages to finish sending');
   }
   const epoch = sessionEpoch;
   const sequence = ++sendSequence;
-  const envelope = { v: 6, roomId: activeRoomId, seq: sequence, body: finalBody };
-  const encrypted = encrypt(JSON.stringify(envelope), sequence);
-  if (queuedCharacters + encrypted.length > MAX_RECEIVED_ENCRYPTED_CHARS) {
+  const envelope = { v: 7, roomId: activeRoomId, seq: sequence, body: finalBody };
+  const encrypted = await encrypt(JSON.stringify(envelope), sequence);
+  if (!isChatEpochActive(epoch) || !active()) throw new Error('Send cancelled or chat ended.');
+  if (queuedMessages >= 24 || encrypted.length > MAX_RECEIVED_ENCRYPTED_CHARS ||
+      queuedCharacters + encrypted.length > MAX_QUEUED_ENCRYPTED_CHARS) {
     throw new Error('Wait for the current attachment to finish sending');
   }
   queuedCharacters += encrypted.length;
@@ -563,7 +596,7 @@ async function sendEncrypted(body, messageId = createMessageId()) {
     let lastError = null;
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
+      if (!isChatEpochActive(epoch) || !active()) throw new Error('Send cancelled or chat ended.');
       try {
         const response = await emitWithAck('send-encrypted', { encrypted, messageId }, 8000);
         if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
@@ -594,54 +627,107 @@ export function sendMessage(text, messageId) {
   return sendEncrypted({ type: 'text', text }, messageId);
 }
 
-async function sendMedia(type, data, mimeType, fileName, messageId = createMessageId(), onProgress) {
+async function sendMedia(type, data, mimeType, fileName, messageId = createMessageId(), onProgress, options = {}) {
+  if (!canSendMessages()) throw new Error('The chat or recipient is no longer available.');
   if (activeMediaSends.size >= 2) throw new Error('Two attachments are already sending');
-  const epoch = sessionEpoch;
-  const file = data?.fileUri && isOwnedAttachment(data.fileUri) ? new File(data.fileUri) : null;
-  if (!file && !isValidBase64(data, MAX_INLINE_MEDIA_BASE64_CHARS)) throw new Error('Invalid attachment');
-  const size = file ? file.size : base64ByteLength(data);
-  if (!Number.isSafeInteger(size) || size <= 0) throw new Error('Empty or invalid attachment');
-  const descriptor = { type, mimeType, fileName: fileName || 'Whisperchat', fileSize: size, allowSaving: allowSavingMyMedia };
+  const epoch = sessionEpoch, source = options.source;
+  const file = !source && data?.fileUri && isOwnedAttachment(data.fileUri) ? openAttachmentFile(data.fileUri) : null;
+  if (!source && !file && !isValidBase64(data, MAX_INLINE_MEDIA_BASE64_CHARS)) throw new Error('Invalid attachment');
+  const size = source ? source.size : file ? file.size : base64ByteLength(data);
+  validateAttachmentSize(size);
+  const descriptor = { type, mimeType, fileName: fileName || 'Whisperchat', fileSize: size, allowSaving: allowSavingMyMedia,
+    ...(source ? { commitRequired: true } : {}) };
   const count = Math.ceil(size / CHUNK_BYTES);
-  let handle;
-  let acknowledged = 0;
+  if (!validateMessageBody({ type: 'media-chunk', messageId, transferId: messageId, descriptor,
+    count, index: count - 1, data: 'YQ==' })) throw new Error('Attachment metadata is invalid');
+  if (sentMediaBudget + size > MAX_CHAT_MEDIA_BYTES) throw new Error('This chat has reached its 256 MiB attachment limit');
+  let handle, acknowledged = 0, stopped = false, committing = false, failureCause;
+  const active = () => !stopped && canSendMessages() && isChatEpochActive(epoch);
+  const stop = () => {
+    if (committing) return; // The completion request is the irreversible publication boundary.
+    stopped = true;
+    for (const [key, waiter] of chunkWaiters) if (key.startsWith(`${messageId}:`)) waiter.reject(new Error('Send cancelled or chat ended.'));
+  };
+  const check = () => { if (!active()) throw new Error('Send cancelled or chat ended.'); };
+  async function acknowledgedSend(suffix, body, timeout = 30000, cleanup = false) {
+    const permitted = cleanup ? () => isChatEpochActive(epoch) && canSendMessages() : active;
+    if (!permitted()) throw new Error('Chat ended');
+    const key = `${messageId}:${suffix}`; let timer;
+    const receipt = new Promise((resolve, reject) => {
+      chunkWaiters.set(key, { resolve, reject });
+      timer = setTimeout(() => reject(new Error(suffix === 'capability' ? 'The recipient must update Whisper to receive saved files.' : 'Recipient stopped receiving.')), timeout);
+    });
+    receipt.catch(() => {});
+    try { await sendEncrypted(body, createMessageId(), permitted); await receipt; if (!permitted()) throw new Error('Chat ended'); }
+    finally { clearTimeout(timer); chunkWaiters.delete(key); }
+  }
   activeMediaSends.add(messageId);
-  onProgress?.(0);
+  const unsubscribeVaultLock = source?.onLock?.(stop);
+  options.signal?.addEventListener('abort', stop);
+  if (options.signal?.aborted) stop();
   try {
+    check();
+    if (source) await acknowledgedSend('capability', { type: 'media-policy', allowSaving: allowSavingMyMedia,
+      vaultTransferVersion: 1, capabilityId: messageId, capabilityReply: false }, 5000);
+    sentMediaBudget += size;
+    onProgress?.(0, 'sending');
     handle = file?.open();
     for (let start = 0; start < count; start += 4) {
-      if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
-      await Promise.all(Array.from({ length: Math.min(4, count - start) }, async (_, offset) => {
-        const index = start + offset;
-        let part;
-        if (handle) {
-          handle.offset = index * CHUNK_BYTES;
-          const bytes = handle.readBytes(Math.min(CHUNK_BYTES, size - index * CHUNK_BYTES));
-          if (bytes.length !== Math.min(CHUNK_BYTES, size - index * CHUNK_BYTES)) throw new Error('Attachment changed');
-          part = encodeChunk(bytes); bytes.fill(0);
-        } else part = data.slice(index * CHUNK_CHARS, (index + 1) * CHUNK_CHARS);
-        const key = `${messageId}:${index}`;
-        let timer;
-        const receipt = new Promise((resolve, reject) => {
-          chunkWaiters.set(key, { resolve, reject });
-          timer = setTimeout(() => reject(new Error('Recipient stopped receiving')), 30000);
-        });
-        receipt.catch(() => {});
+      check();
+      const results = await Promise.allSettled(Array.from({ length: Math.min(4, count - start) }, async (_, offset) => {
         try {
-          await sendEncrypted({ type: 'media-chunk', transferId: messageId, descriptor, index, count, data: part });
-          await receipt;
-          if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
+          check();
+          const index = start + offset;
+          let part;
+          if (source || handle) {
+            if (handle) handle.offset = index * CHUNK_BYTES;
+            const bytes = source ? source.readChunk(index) : handle.readBytes(Math.min(CHUNK_BYTES, size - index * CHUNK_BYTES));
+            try {
+              if (bytes.length !== Math.min(CHUNK_BYTES, size - index * CHUNK_BYTES)) throw new Error('Saved file is missing or corrupted.');
+              part = encodeChunk(bytes);
+            } finally { bytes.fill(0); }
+          } else part = data.slice(index * CHUNK_CHARS, (index + 1) * CHUNK_CHARS);
+          await acknowledgedSend(index, { type: 'media-chunk', transferId: messageId, descriptor, index, count, data: part });
           acknowledged += base64ByteLength(part);
-          onProgress?.(acknowledged / size);
-        } finally { clearTimeout(timer); chunkWaiters.delete(key); }
+          onProgress?.(source ? Math.min(0.98, acknowledged / size) : acknowledged / size, 'sending');
+        } catch (error) { failureCause ||= error; stop(); throw error; }
       }));
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure) throw failureCause || failure.reason;
     }
+    if (source) {
+      check(); committing = true; onProgress?.(0.99, 'finishing');
+      await acknowledgedSend('complete', { type: 'media-complete', transferId: messageId });
+    }
+    onProgress?.(1, 'done');
     return messageId;
+  } catch (error) {
+    stopped = true;
+    if (isChatEpochActive(epoch) && canSendMessages()) {
+      await acknowledgedSend('abort', { type: 'media-transfer-error', transferId: messageId, abortRequest: true }, 5000, true).catch(() => {});
+    }
+    if (committing) throw new Error('Delivery confirmation was lost. The recipient may have received the complete file.');
+    throw error;
   } finally {
-    handle?.close();
-    activeMediaSends.delete(messageId);
+    unsubscribeVaultLock?.();
+    options.signal?.removeEventListener('abort', stop);
+    handle?.close(); activeMediaSends.delete(messageId);
     for (const [key, waiter] of chunkWaiters) if (key.startsWith(`${messageId}:`)) waiter.reject(new Error('Transfer stopped'));
   }
+}
+
+export async function sendVaultFile(id, messageId = createMessageId(), onProgress, signal) {
+  const epoch = sessionEpoch;
+  const active = () => !signal?.aborted && canSendMessages() && isChatEpochActive(epoch);
+  if (!active()) throw new Error('The chat or recipient is no longer available.');
+  onProgress?.(0, 'checking');
+  const source = await openVaultSend(id, active);
+  try {
+    if (!active()) throw new Error('Send cancelled or chat ended.');
+    const { mime, name } = source.entry;
+    const type = IMAGE_MIME_TYPES.has(mime) ? 'image' : VIDEO_MIME_TYPES.has(mime) ? 'video' : 'file';
+    return await sendMedia(type, null, mime, name, messageId, onProgress, { source, signal });
+  } finally { source.close(); }
 }
 
 export function sendImage(imageData, mimeType, messageId, onProgress) {

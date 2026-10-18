@@ -54,7 +54,7 @@ export default function ChatEndedScreen({ navigation, route }) {
           </View>
           <Text style={[typography.title, { color: colors.text, marginBottom: sp.xs }]}>Chat ended</Text>
           <Text style={[typography.body, { color: colors.textSecondary }]}>The conversation has been cleared from this app.</Text>
-          <Text style={[typography.caption, { color: colors.textTertiary, marginTop: sp.sm }]}>Copies already exported cannot be recalled.</Text>
+          <Text style={[typography.caption, { color: colors.textTertiary, marginTop: sp.sm }]}>Files saved privately in Whisper remain in Saved Files.</Text>
           <Text style={[typography.caption, { color: colors.textTertiary, fontStyle: 'italic', marginTop: sp.sm, textAlign: 'center' }]}>
             {reason}
           </Text>

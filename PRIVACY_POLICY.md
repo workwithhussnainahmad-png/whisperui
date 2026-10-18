@@ -1,5 +1,5 @@
 # Privacy Policy
-Last updated: July 2026
+Last updated: October 18, 2026
 
 Whisper ("we", "our", or "us") respects your privacy and is committed to protecting it. This Privacy Policy explains how Whisper handles information when you use our mobile application (the "App") and related chat relay service.
 
@@ -41,7 +41,15 @@ This data is ephemeral. It is not used to build user profiles, and it is not ret
 
 ### Messages and Media
 
-Chat messages, images, videos, and files are end-to-end encrypted on your device before being relayed. The server is designed to relay encrypted payloads only and does not store message content or media as a permanent archive.
+Private invite chats encrypt messages and attachments on your device before relay. Protocol 7 requires a secret invite and an installed build with the native libsignal integration. Share the full invite only through a trusted channel: possession of it does not independently prove a person's identity. The implementation uses libsignal for key agreement and ratcheting encryption. Whisper's integration and invite authentication have not received an independent cryptographic audit.
+
+The protocol 7 app disables random chat and public groups. The backend retains optional legacy group functionality; if an operator enables it for other clients, those public group messages are readable by the server and are not end-to-end encrypted.
+
+The app connects directly over HTTPS. The server and its hosting/network providers can observe the connection IP address, timing, and traffic volume. Whisper does not currently route connections through Tor.
+
+Text conversations and messaging keys are held in memory. Completed chat attachment caches use temporary per-file encryption keys and are cleared with the chat. Files you explicitly save remain encrypted in Whisper's private vault after the chat ends or the app restarts. Vault keys use Android Keystore or non-synchronizing, device-only iOS Keychain protection. The vault is excluded from backups; losing its master key makes saved files inaccessible. You can view or delete files in Saved Files, or erase the entire vault and key with Reset Whisper.
+
+Attachment saving no longer exports to Files, Gallery, Downloads, Photos or other apps. Invite QR sharing remains an explicit external share action. Media preparation and opened previews can still require private temporary plaintext files; cleanup runs on close, chat teardown and startup, but is not a forensic-erasure guarantee. Previously exported external copies are not removed by this update.
 
 - Message content is not readable by us under normal operation of the E2E design.
 - Undelivered or ended chats are not kept as history.
@@ -57,7 +65,7 @@ Depending on features you use, the App may request access to:
 
 These permissions are used only to provide the feature you requested. Whisper does not upload your full photo library or device files. Only content you choose to send in a chat is processed for that chat.
 
-Whisper does not request microphone access for voice recording.
+Whisper requests microphone permission when recording audio as part of a video.
 
 ### Contacts
 

@@ -4,7 +4,15 @@ plugins {
 }
 group = 'com.whisper.privacy'
 version = '1.0.0'
+repositories {
+  maven { url 'https://build-artifacts.signal.org/libraries/maven/'; content { includeGroup 'org.signal' } }
+}
+dependencies {
+  implementation 'org.signal:libsignal-client:0.105.1'
+  implementation 'org.signal:libsignal-android:0.105.1'
+}
 android {
   namespace 'com.whisper.privacy'
   defaultConfig { versionCode 1; versionName '1.0.0' }
+  packaging { resources { excludes += ['**/*.dll', '**/*.dylib'] } }
 }

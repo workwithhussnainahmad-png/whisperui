@@ -7,10 +7,10 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, scanFromURLAsync } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as Sharing from 'expo-sharing';
-import * as Crypto from 'expo-crypto';
+import { privacySelfCheck, preparePrivateStorage, protectPrivateTemporary } from '../services/privateStorage';
+import { recordCleanup } from '../services/cleanupStatus';
 import { inviteQrPng } from '../services/inviteQrImage';
-import { cleanAbandonedExports } from '../services/mediaExport';
+import { shareInviteQr } from '../services/mediaExport';
 import StatusBar from '../components/StatusBar';
 import Button from '../components/Button';
 import Icon from '../components/Icon';
@@ -23,6 +23,7 @@ import { useTheme } from '../hooks/useTheme';
 import ScreenContainer from '../components/ScreenContainer';
 import InviteQr from '../components/InviteQr';
 import { useResponsiveLayout } from '../hooks/useResponsiveLayout';
+import { ALLOW_UNVERIFIED_CHATS } from '../config';
 
 export default function HomeScreen({ navigation }) {
   const { colors, typography, tracking } = useTheme();
@@ -233,26 +234,11 @@ export default function HomeScreen({ navigation }) {
     const code = generatedCode;
     sharingQrRef.current = true;
     setIsSharingQr(true);
-    let uri;
     try {
-      if (!FileSystem.cacheDirectory || !(await Sharing.isAvailableAsync())) {
-        throw new Error('Sharing unavailable');
-      }
-      await cleanAbandonedExports();
-      const directory = `${FileSystem.cacheDirectory}whisper-exports/invites/`;
-      await FileSystem.makeDirectoryAsync(directory, { intermediates: true });
-      uri = `${directory}Whisperchat-invite-${Crypto.randomUUID()}.png`;
-      await FileSystem.writeAsStringAsync(uri, inviteQrPng(formatInviteCodeForUser(code)),
-        { encoding: FileSystem.EncodingType.Base64 });
-      if (pendingInviteRef.current !== code || !getSocket()?.connected) {
-        Alert.alert('Invite unavailable', 'Create a new invite before sharing.');
-        return;
-      }
-      await Sharing.shareAsync(uri, { mimeType: 'image/png', UTI: 'public.png', dialogTitle: 'Share invite QR' });
+      await shareInviteQr(inviteQrPng(formatInviteCodeForUser(code)), () => pendingInviteRef.current === code && Boolean(getSocket()?.connected));
     } catch {
       Alert.alert('Could not share QR', 'Try again, or long-press the invite code to copy it.');
     } finally {
-      if (uri) await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
       sharingQrRef.current = false;
       setIsSharingQr(false);
     }
@@ -268,10 +254,11 @@ export default function HomeScreen({ navigation }) {
   const importQr = async () => {
     let ownedUri = null;
     try {
+      await preparePrivateStorage();
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: false, quality: 1 });
       if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
-      if (FileSystem.cacheDirectory && asset.uri.startsWith(FileSystem.cacheDirectory)) ownedUri = asset.uri;
+      if (FileSystem.cacheDirectory && asset.uri.startsWith(FileSystem.cacheDirectory)) { ownedUri = asset.uri; protectPrivateTemporary(ownedUri); }
       const scans = await scanFromURLAsync(asset.uri, ['qr']);
       const codes = [...new Set(scans.map((scan) => extractInviteCode(scan.data)).filter(Boolean))];
       if (codes.length !== 1) {
@@ -281,7 +268,7 @@ export default function HomeScreen({ navigation }) {
       scanLockedRef.current = false;
       handleQrScanned({ data: codes[0] });
     } catch { Alert.alert('Cannot read QR', 'Try a clearer image or paste the complete invite code.'); }
-    finally { if (ownedUri) await FileSystem.deleteAsync(ownedUri, { idempotent: true }).catch(() => {}); }
+    finally { if (ownedUri) await FileSystem.deleteAsync(ownedUri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false)); }
   };
 
   const handleOpenScanner = () => Alert.alert('Join with QR', 'Choose how to read the invite.', [
@@ -337,11 +324,16 @@ export default function HomeScreen({ navigation }) {
                 <Text style={[typography.title, { color: colors.text, letterSpacing: tracking.tight }]}>Whisper</Text>
               </View>
               <Text style={[typography.body, { color: colors.textSecondary }]}>Live conversations. No server chat history.</Text>
+              {__DEV__ && <Button title="Privacy self-check" variant="ghost" onPress={async () => {
+                try { Alert.alert('Privacy self-check', JSON.stringify(await privacySelfCheck(), null, 2)); }
+                catch { Alert.alert('Privacy self-check', 'Check unavailable. Install the updated native debug build.'); }
+              }} />}
+              <Button title="Saved Files" variant="ghost" onPress={() => navigation.navigate('SavedFiles')} />
             </View>
 
             {/* ── Actions ── */}
             <View style={s.actions}>
-              <Button
+              {ALLOW_UNVERIFIED_CHATS && <Button
                 variant="primary"
                 size="lg"
                 fullWidth
@@ -351,9 +343,9 @@ export default function HomeScreen({ navigation }) {
                 loading={isFindingRandom}
                 disabled={isCreating || isJoiningInvite}
                 onPress={handleFindRandom}
-              />
+              />}
 
-              <Pressable
+              {ALLOW_UNVERIFIED_CHATS && <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Open global group chat, ${groupCount} users online`}
                 accessibilityHint="Join the public anonymous room"
@@ -383,7 +375,7 @@ export default function HomeScreen({ navigation }) {
                     </View>
                   </View>
                   <Text style={[typography.caption, { color: colors.textSecondary, marginTop: 3 }]}>
-                    Global anonymous room - messages expire
+                    Public room - the server can read messages
                   </Text>
                 </View>
 
@@ -393,7 +385,11 @@ export default function HomeScreen({ navigation }) {
                 </View>
 
                 <Icon name="chevron-forward" size={20} color={colors.textTertiary} />
-              </Pressable>
+              </Pressable>}
+
+              {!ALLOW_UNVERIFIED_CHATS && <Text style={[typography.caption, { color: colors.textSecondary }]}>
+                Private invites only. Share your invite through a trusted channel.
+              </Text>}
 
               <View style={s.halfRow}>
                 <View style={{ flex: 1 }}>

@@ -1,10 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, Image, StyleSheet, TouchableOpacity } from 'react-native';
-import PrivateVideo from './PrivateVideo';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import Icon from './Icon';
 import { sp, radius } from '../theme';
 import { useTheme } from '../hooks/useTheme';
-import { useResponsiveLayout } from '../hooks/useResponsiveLayout';
 
 const fmtSize = (b) => {
   if (!b) return '';
@@ -24,22 +22,12 @@ const fmtTime = (ts) => {
   return `${h}:${m} ${ampm}`;
 };
 
-const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif']);
-const VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm', 'video/x-m4v', 'video/3gpp']);
 
-export default function ChatBubble({ message, isSent, onSave, onOpen, mediaActive = true }) {
-  const [playing, setPlaying] = useState(false);
+export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSend, mediaActive = true }) {
   const [saving, setSaving] = useState(false);
   const { colors, typography } = useTheme();
-  const { isTablet, mediaImageSize, mediaVideoWidth, mediaVideoHeight } = useResponsiveLayout();
-  useEffect(() => {
-    if (!mediaActive) {
-      setPlaying(false);
-    }
-  }, [mediaActive]);
   const save = async () => {
     if (!mediaActive || saving || isSent || message?.allowSaving !== true || !onSave) return;
-    setPlaying(false);
     setSaving(true);
     try { await onSave(message); } finally { setSaving(false); }
   };
@@ -54,34 +42,15 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, mediaActiv
   const mediaRadius = radius.xl;
 
   const content = () => {
+    if (['image', 'video'].includes(message.type)) {
+      return <View style={{ padding: 16 }}>
+        <Text style={[typography.bodyStrong, { color: colors.text }]}>
+          {message.type === 'image' ? 'Image attachment' : 'Video attachment'}
+        </Text>
+        <Text style={[typography.caption, { color: colors.textSecondary }]}>Tap to preview · {fmtSize(message.fileSize)}</Text>
+      </View>;
+    }
     switch (message.type) {
-      case 'image':
-        if ((!message.imageData && !message.fileUri) || !IMAGE_MIME_TYPES.has(message.mimeType)) return null;
-        return (
-          <Image
-            source={{ uri: message.fileUri || `data:${message.mimeType};base64,${message.imageData}` }}
-            style={{ width: mediaImageSize, height: mediaImageSize, borderRadius: radius.lg }}
-            resizeMode="cover"
-            accessibilityIgnoresInvertColors
-          />
-        );
-      case 'video':
-        if ((!message.videoData && !message.fileUri) || !VIDEO_MIME_TYPES.has(message.mimeType)) return null;
-        return (
-          <View>
-          <PrivateVideo
-            uri={message.fileUri || `data:${message.mimeType};base64,${message.videoData}`}
-            style={{ width: mediaVideoWidth, height: mediaVideoHeight, borderRadius: radius.lg }}
-            playing={mediaActive && playing}
-            onStopped={() => setPlaying(false)}
-          />
-          <TouchableOpacity disabled={!mediaActive} onPress={() => setPlaying((value) => !value)}
-            accessibilityRole="button" accessibilityLabel={playing ? 'Pause video' : 'Play video'}
-            style={{ padding: 10 }}>
-            <Text style={[typography.caption, { color: colors.text }]}>{playing ? 'Pause' : 'Play video'}</Text>
-          </TouchableOpacity>
-          </View>
-        );
       case 'file':
         return (
           <View style={s.fileRow}>
@@ -166,19 +135,22 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, mediaActiv
       >
         {['image', 'video', 'file'].includes(message.type) && onOpen ?
           <TouchableOpacity disabled={!mediaActive} accessibilityLabel="Open attachment" onPress={() => {
-            setPlaying(false); videoRef.current?.pauseAsync().catch(() => {}); onOpen(message);
+            onOpen(message);
           }}>{body}</TouchableOpacity> : body}
         {isSent && ['image', 'video', 'file'].includes(message.type) && message.delivery === 'sending' && (
           <View accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: 100, now: Math.round((message.progress || 0) * 100) }}>
             <View style={{ height: 4, backgroundColor: colors.surface3, marginTop: 8 }}>
               <View style={{ height: 4, width: `${Math.round((message.progress || 0) * 100)}%`, backgroundColor: colors.accent }} />
             </View>
-            <Text style={[typography.caption, { color: colors.text }]}>{Math.round((message.progress || 0) * 100)}% received by peer</Text>
+            <Text style={[typography.caption, { color: colors.text }]}>{message.sendStage === 'checking' ? 'Checking saved file…' : message.sendStage === 'finishing' ? 'Finishing send…' : `${Math.round((message.progress || 0) * 100)}% received by peer`}</Text>
+            {message.vaultId && ['checking', 'sending'].includes(message.sendStage) && onCancelSend && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel file send" style={{ padding: 12 }} onPress={() => onCancelSend(message.id)}>
+              <Text style={{ color: colors.accent }}>Cancel send</Text>
+            </TouchableOpacity>}
           </View>
         )}
         {!isSent && message.allowSaving === true && ['image', 'video', 'file'].includes(message.type) && onSave && (
           <TouchableOpacity onPress={save} disabled={saving || !mediaActive}
-            accessibilityRole="button" accessibilityLabel="Save attachment" style={{ padding: 10 }}>
+            accessibilityRole="button" accessibilityLabel="Save privately in Whisper" style={{ padding: 10 }}>
             <Icon name={saving ? 'hourglass-outline' : 'download-outline'} size={24} color={colors.accent} />
           </TouchableOpacity>
         )}

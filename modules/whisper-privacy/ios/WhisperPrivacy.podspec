@@ -11,5 +11,8 @@ Pod::Spec.new do |s|
   s.swift_version = '5.9'
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
+  s.dependency 'LibSignalClient', '0.105.1'
+  s.pod_target_xcconfig = { 'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_ROOT)/LibSignalClient/swift/Sources/SignalFfi"' }
+  s.user_target_xcconfig = { 'SWIFT_ENABLE_EXPLICIT_MODULES' => 'NO' }
   s.source_files = '**/*.swift'
 end

@@ -1,6 +1,7 @@
+import { recordCleanup } from './cleanupStatus';
 import * as FileSystem from 'expo-file-system/legacy';
 import { isExpoGoFeatureTest } from './captureProtection';
-import { stageAttachment } from './attachmentFiles';
+import { stageAttachment, isOwnedAttachment } from './attachmentFiles';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import { Unzip, UnzipInflate } from 'fflate';
 import { PDFDocument } from 'pdf-lib';
@@ -10,7 +11,7 @@ export const nativeAttachments = requireOptionalNativeModule('WhisperAttachments
 let initialization;
 export function initializeAttachmentTools() {
   if (!initialization) initialization = nativeAttachments
-    ? nativeAttachments.cleanTemporaryFiles() : Promise.resolve();
+    ? nativeAttachments.cleanTemporaryFiles().catch(error => { initialization = null; recordCleanup('native-temp', false); throw error; }) : Promise.resolve();
   return initialization;
 }
 export async function cleanVideo(uri, confirmOriginal, originalMime = null) {
@@ -28,9 +29,13 @@ export async function cleanVideo(uri, confirmOriginal, originalMime = null) {
   await initializeAttachmentTools();
   const output = await nativeAttachments.cleanVideoFile(uri);
   try { return await stageAttachment(output, 'mp4', true); }
-  finally { await FileSystem.deleteAsync(output, { idempotent: true }).catch(() => {}); }
+  finally { await FileSystem.deleteAsync(output, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false)); }
 }
 export function hasNativeDocumentTools() { return Boolean(nativeAttachments); }
+export async function validateImageFile(uri) {
+  if (!isOwnedAttachment(uri) || !nativeAttachments?.validateImageFile) throw new Error('Protected local image validation is unavailable');
+  return nativeAttachments.validateImageFile(uri);
+}
 
 const decode = (base64) => Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
 export function encodeBytes(bytes) {

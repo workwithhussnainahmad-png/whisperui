@@ -68,15 +68,16 @@ export function createVaultLock(io) {
     },
     async disable(confirm) {
       await initialize();
-      if (!state.enabled) return;
+      if (!state.enabled) return false;
       lock(); // Force a new OS key authentication even if a screen was already open.
       const release = await acquire();
       const token = epoch;
       try {
-        if (!await confirm()) return;
+        if (!await confirm()) { lock(); return false; }
         if (epoch !== token || !foreground || state.locked) throw new Error('Saved Files locked. Retry disabling.');
         lock(); await io.wipe(); policy = null; ready = null;
         state = { enabled: false, timeout: 60, locked: false, authenticating: false, recovery: false }; emit();
+        return true;
       } finally { release(); }
     },
     async configure(enabled, timeout) {

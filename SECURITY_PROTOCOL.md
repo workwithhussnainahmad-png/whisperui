@@ -1,3 +1,11 @@
+> Phase 4X update: six-character join codes are lookup IDs only. New sessions use
+> libsignal with public bundle envelopes; authenticate a contact by comparing safety
+> codes over a trusted channel. Random one-to-one chat is enabled with unverified-peer
+> notices and bilateral media consent; public groups remain disabled. Earlier secret-
+> invite-only statements below describe the superseded design. Disabling vault lock
+> now permanently erases Saved Files after authentication and typed DELETE confirmation.
+> See PHASE4X_REPORT.md and PRIVACY_POLICY.md for implementation, retention and limits.
+
 # Protocol 7 and encrypted attachment storage
 
 > Phase 1 saved-file update: [PRIVATE_VAULT_PHASE1.md](PRIVATE_VAULT_PHASE1.md)

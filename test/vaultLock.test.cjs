@@ -67,7 +67,7 @@ test('disable authenticates before confirmation; cancelling either step preserve
   await assert.rejects(f.api.disable(async () => { confirms++; return true; }));
   assert.equal(confirms, 0); assert.equal(f.policy.enabled, true);
   f.fail(null); await f.api.disable(async () => { confirms++; return false; });
-  assert.equal(confirms, 1); assert.equal(f.policy.enabled, true);
+  assert.equal(confirms, 1); assert.equal(f.policy.enabled, true); assert.equal(f.api.getState().locked, true); assert.equal(f.key, false);
 });
 test('confirmed disable wipes keys and allows a new unlocked vault', async () => {
   const f = fixture(); await f.api.disable(async () => true);

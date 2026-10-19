@@ -750,9 +750,11 @@ export async function blockPeer() {
 export async function enableMedia() {
   if (!canSendMessages()) throw new Error('Chat is not ready');
   const epoch = sessionEpoch;
-  await sendEncrypted({ type: 'media-consent', allowed: true });
-  if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
-  localMediaConsent = true;
+  localMediaConsent = true; // Receive-ready before the peer can observe our consent.
+  try {
+    await sendEncrypted({ type: 'media-consent', allowed: true });
+    if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
+  } catch (error) { if (isChatEpochActive(epoch)) localMediaConsent = false; throw error; }
 }
 
 export function leaveRoom() {

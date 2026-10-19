@@ -66,7 +66,7 @@ function endChatSession(navigation, reasonCode) {
 export default function ChatScreen({ navigation, route }) {
   const insets = useSafeAreaInsets();
   const { colors, typography, isDark } = useTheme();
-  const { isTablet, horizontalPadding, touchMin } = useResponsiveLayout();
+  const { isTablet, horizontalPadding, touchMin, height } = useResponsiveLayout();
   const roomId = route.params?.roomId;
   const chatMode = route.params?.chatMode || 'random';
   const inviteCode = route.params?.inviteCode || null;
@@ -864,7 +864,7 @@ export default function ChatScreen({ navigation, route }) {
                   borderRadius: isTablet ? 24 : 20,
                   fontSize: isTablet ? 18 : 16,
                   minHeight: isTablet ? 48 : 40,
-                  maxHeight: isTablet ? 120 : 100,
+                  maxHeight: Math.max(touchMin, height * 0.18),
                 },
               ]}
               placeholder={inputPlaceholder}

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, Alert, AppState, StyleSheet, ActivityIndicator, Switch, TextInput } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, Alert, AppState, StyleSheet, ActivityIndicator, Switch, TextInput, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AttachmentViewer from '../components/AttachmentViewer';
 import { listSavedFiles, deleteSavedFile, vaultError, beginVaultSession, subscribeVaultLock, getVaultLockState, configureVaultLock, disableVaultLock, lockSavedFiles } from '../services/privateVault';
@@ -48,13 +48,14 @@ export default function SavedFilesScreen({ navigation }) {
     if (working.current) return;
     working.current = true; setBusy(true); setError('');
     try {
-      await disableVaultLock(() => new Promise(resolve => {
+      const wiped = await disableVaultLock(() => new Promise(resolve => {
         confirmWipe.current = resolve; setConfirmation(''); setDestructive(true);
       }));
+      if (wiped && mounted.current) setItems([]);
     } catch (error) { if (mounted.current) setError(vaultError(error)); }
     finally {
       confirmWipe.current = null; working.current = false;
-      if (mounted.current) { setDestructive(false); setBusy(false); reload(); }
+      if (mounted.current) { setDestructive(false); setBusy(false); }
     }
   }
   function toggleLock(enabled) {
@@ -128,13 +129,13 @@ export default function SavedFilesScreen({ navigation }) {
         </TouchableOpacity>{action('Delete', () => remove(item), busy)}
       </View>} />
     {action('Reset Whisper', reset, busy)}
-    {destructive && <SafeAreaView style={[StyleSheet.absoluteFill, { backgroundColor: colors.surface, justifyContent: 'center', padding: 24 }]}>
+    {destructive && <SafeAreaView style={[StyleSheet.absoluteFill, { backgroundColor: colors.surface }]}><KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', padding: 24 }}>
       <Text style={[s.note, { color: colors.text }]}>All saved files will be permanently deleted. This cannot be undone.</Text>
       <TextInput accessibilityLabel="Type DELETE to erase Saved Files" placeholder="Type DELETE" autoCapitalize="characters"
         value={confirmation} onChangeText={setConfirmation} style={[s.note, { color: colors.text, borderWidth: 1, borderColor: colors.hairline }]} />
       {action('Cancel', () => confirmWipe.current?.(false))}
       {action('Permanently delete and disable lock', () => confirmWipe.current?.(true), confirmation !== 'DELETE')}
-    </SafeAreaView>}
+    </ScrollView></KeyboardAvoidingView></SafeAreaView>}
     {viewing && <AttachmentViewer message={viewing} onClose={() => setViewing(null)} />}
   </SafeAreaView>;
 }

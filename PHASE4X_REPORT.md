@@ -28,3 +28,27 @@
 - Media opt-in is enforced in encrypted service paths before vault reads and before received chunks, not just by disabling buttons. Both participants must opt in; permission resets at chat end. Existing hidden-until-tapped image bubbles and sender saving policy apply. Safety fingerprint is visible with an unverified-peer label.
 - Volatile block source-pair HMAC labels last 30 minutes (sweep within one minute), survive reconnect, and are capped at 10000. Shared-network collateral and network-change evasion are documented in PRIVACY_POLICY.md. No transcript/media collection for reports; only aggregate category counters.
 - Verification: 87 mobile tests and 2 real-libsignal/two-client integrations pass for both lookup invite and random matching, exact media bytes, Saved Files transfer, cancellation/tampering and lock abort. 21 backend tests pass including queue cancel/timeout, self/double match prevention, reconnect block and room cleanup.
+
+## Part 5 ? release size
+- Measured app source assets: 319,298 bytes; none are oversized. All runtime dependencies found in use (including PDF/Office/QR helpers and native capture/picker/vault modules) were retained. Removed 18 unused bundled font families by importing Ionicons directly.
+- Release defaults to arm64-v8a only; optional preview-universal selects arm64-v8a + armeabi-v7a. x86/x86_64 are absent from release profiles; development retains x86_64 for emulators.
+- expo-build-properties enables R8 minification, resource shrinking and PNG crunching; app config explicitly selects Hermes. Added keep rules for org.signal.libsignal.**, com.whisper.privacy.**, ExpoModulesPackageList and subclasses of Expo Module. React Native/Hermes consumer JNI keep rules remain provided upstream.
+- withReleasePackaging excludes desktop libsignal .so resources separately from Android JNI, and excludes test-only libsignal_jni_testing.so. Existing desktop DLL/dylib exclusions remain. Source: https://github.com/signalapp/libsignal/blob/v0.105.1/README.md and java/client/build.gradle (desktop resources), java/android/build.gradle (Android libraries).
+- eas preview builds APK, production builds AAB; preview-universal is an optional two-ARM-ABI APK profile.
+
+Measured byte counts (Hermes production exports, not APK sizes):
+
+| Item | Before | After |
+|---|---:|---:|
+| Android Hermes bundle | 4,871,925 | 4,536,308 |
+| iOS Hermes bundle | 4,868,069 | 4,531,771 |
+| Android exported assets | 4,192,171 | 505,055 |
+| iOS exported assets | 4,193,176 | 506,060 |
+| Font bytes (either platform) | 4,076,840 | 389,724 |
+| Font families | 19 | 1 |
+| arm64 APK | No artifact supplied | Not built here |
+| Universal APK | User reports 200+ MB; not independently measured | Not built here |
+
+The 50 MB / 100 MB targets are unverified. No APK/AAB, JDK, Android SDK or Gradle cache is present. Attempts to download the pinned Signal Maven artifacts for native contributor measurements failed with TLS connection resets in both Python and curl. Therefore native .so-per-ABI and dex sizes cannot honestly be provided. This is not evidence the target is unreachable.
+
+Fresh Android prebuild succeeded in an isolated temporary project. Parsed generated manifest/XML/gradle.properties/proguard/build.gradle confirm ARM-only release, both shrinkers, Hermes, keep rules, desktop/test exclusions, unchanged deny-all backup rules and QR-only providers. Both Android and iOS production JS/Hermes exports succeeded. 89 mobile tests pass after this part.

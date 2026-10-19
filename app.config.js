@@ -48,6 +48,20 @@ module.exports = ({ config }) => {
       android: {
         ...(options.android || {}),
         usesCleartextTraffic: false,
+        buildArchs: process.env.EAS_BUILD_PROFILE === 'development'
+          ? ['arm64-v8a', 'x86_64']
+          : process.env.EAS_BUILD_PROFILE === 'preview-universal' ? ['arm64-v8a', 'armeabi-v7a'] : ['arm64-v8a'],
+        enableMinifyInReleaseBuilds: true,
+        enableShrinkResourcesInReleaseBuilds: true,
+        enablePngCrunchInReleaseBuilds: true,
+        extraProguardRules: [options.android?.extraProguardRules || '',
+          // libsignal calls Java classes through JNI; preserve their names/members.
+          '-keep class org.signal.libsignal.** { *; }',
+          '-keep class com.whisper.privacy.** { *; }',
+          '-keep class expo.modules.ExpoModulesPackageList { *; }',
+          '-keep class * extends expo.modules.kotlin.modules.Module { *; }',
+          // React Native/Hermes provide their own consumer JNI rules.
+        ].join('\n'),
         packagingOptions: {
           ...(options.android?.packagingOptions || {}),
           exclude: [...new Set([...(options.android?.packagingOptions?.exclude || []), '**/*.dll', '**/*.dylib'])],
@@ -60,9 +74,11 @@ module.exports = ({ config }) => {
   plugins.push(require('./plugins/withPrivacyWindow'));
   plugins.push(require('./plugins/withSignal'));
   plugins.push(require('./plugins/withPrivateStorage'));
+  plugins.push(require('./plugins/withReleasePackaging'));
 
   return {
     ...config,
+    jsEngine: 'hermes',
     plugins,
     extra: {
       ...(config.extra || {}),

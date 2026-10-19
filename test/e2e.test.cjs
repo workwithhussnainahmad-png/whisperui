@@ -91,8 +91,9 @@ test('six-character lookup accepts formatting/deep links and rejects legacy secr
   const { normalizeJoinCode, displayJoinCode } = loadService('joinCode');
   assert.equal(normalizeJoinCode('aBc - deF'), 'ABCDEF');
   assert.equal(normalizeJoinCode('whisperchat://join/ABC-DEF'), 'ABCDEF');
-  assert.equal(displayJoinCode('abcdef'), 'ABC-DEF');
-  for (const invalid of [INVITE, 'ABC0EF', 'ABCIEF', 'ABCLEF', 'ABCOEF', 'ABC1EF', 'ABCDE', 'ABCDEFG']) assert.equal(normalizeJoinCode(invalid), null);
+  assert.equal(displayJoinCode('abcdef'), 'ABCDEF');
+  for (const char of '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') assert.equal(normalizeJoinCode(char.repeat(6)), char.repeat(6));
+  for (const invalid of [INVITE, 'ABC_EF', 'ABC!EF', 'ABCDE', 'ABCDEFG']) assert.equal(normalizeJoinCode(invalid), null);
 });
 
 function loadService(name) {

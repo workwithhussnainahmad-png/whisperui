@@ -1,7 +1,7 @@
 import { protectPrivateTemporary } from '../services/privateStorage';
 import { recordCleanup } from '../services/cleanupStatus';
 import React, { useState, useRef } from 'react';
-import { View, TouchableOpacity, Text, StyleSheet, Modal, Pressable, Alert, ActivityIndicator, Platform } from 'react-native';
+import { View, TouchableOpacity, Text, StyleSheet, Modal, Pressable, Alert, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { deleteAttachment } from '../services/attachmentFiles';
 import { prepareAttachment } from '../services/prepareAttachment';
@@ -34,10 +34,11 @@ function confirmPrivacyWarning(title, message) {
   });
 }
 
-export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onOpenCamera, onOpenVault, disabled = false }) {
+export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onPreparingChange, onOpenCamera, onOpenVault, disabled = false }) {
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const updateProcessing = (value) => { setIsProcessing(value); onPreparingChange?.(value); };
   const [isPicking, setIsPicking] = useState(false);
   const pickingRef = useRef(false);
   const pendingPick = useRef(null);
@@ -68,7 +69,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
         if (!asset) return;
         rememberCopy(asset.uri);
         if (!isChatEpochActive(epoch)) return;
-        setIsProcessing(true);
+        updateProcessing(true);
         if (asset.type === 'video') {
           const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'video/mp4' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
           if (!prepared) return;
@@ -83,7 +84,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
       }
       else if (key === 'photo') {
         const p = await ImagePicker.requestMediaLibraryPermissionsAsync();
-        if (!p.granted) { setIsProcessing(false); return; }
+        if (!p.granted) { updateProcessing(false); return; }
         const r = await ImagePicker.launchImageLibraryAsync({
           mediaTypes: ['images'],
           quality: 1,
@@ -94,7 +95,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
         if (!r.canceled && r.assets?.[0]) {
           rememberCopy(r.assets[0].uri);
           if (!isChatEpochActive(epoch)) return;
-          setIsProcessing(true);
+          updateProcessing(true);
           const asset = r.assets[0];
           const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'image/jpeg' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
           if (!prepared) return;
@@ -111,7 +112,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
           const a = r.assets[0];
           rememberCopy(a.uri);
           if (!isChatEpochActive(epoch)) return;
-          setIsProcessing(true);
+          updateProcessing(true);
           const prepared = await prepareAttachment({ ...a, mimeType: a.mimeType || 'video/mp4' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
           if (!prepared) return;
           if (isChatEpochActive(epoch)) onVideoSelected({ ...prepared, mimeType: prepared.mimeType || 'video/mp4' });
@@ -124,11 +125,11 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
           const a = r.assets[0];
           rememberCopy(a.uri);
           if (!isChatEpochActive(epoch)) return;
-          setIsProcessing(true);
+          updateProcessing(true);
           const payload = await prepareAttachment(a, () => isChatEpochActive(epoch), async (...args) => {
-            setIsProcessing(false);
+            updateProcessing(false);
             const confirmed = await confirmPrivacyWarning(...args);
-            if (confirmed) setIsProcessing(true);
+            if (confirmed) updateProcessing(true);
             return confirmed;
           });
           if (payload && isChatEpochActive(epoch)) onFileSelected(payload);
@@ -141,7 +142,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
       await Promise.all(ownedCopies.map((uri) => FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false))));
       pickingRef.current = false;
       setIsPicking(false);
-      setIsProcessing(false);
+      updateProcessing(false);
       onProcessingChange?.(false);
     }
   };
@@ -217,10 +218,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
         </Pressable>
       </Modal>
 
-      {isProcessing && <View accessibilityRole="progressbar" accessibilityLabel="Preparing attachment" style={{ alignItems: 'center' }}>
-        <ActivityIndicator size="small" color={colors.accent} />
-        <Text style={[typography.micro, { color: colors.textSecondary }]}>Preparing…</Text>
-      </View>}
+
 
     </View>
   );

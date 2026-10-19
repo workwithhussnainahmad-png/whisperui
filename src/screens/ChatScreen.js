@@ -81,7 +81,7 @@ export default function ChatScreen({ navigation, route }) {
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [privacyOverlayVisible, setPrivacyOverlayVisible] = useState(false);
   const [pendingDropped, setPendingDropped] = useState(false);
-  const [allowSaving, setAllowSaving] = useState(false);
+  const [allowSaving, setAllowSaving] = useState(true);
   const [changingPolicy, setChangingPolicy] = useState(false);
   const [protectionReady, setProtectionReady] = useState(false);
 
@@ -100,6 +100,7 @@ export default function ChatScreen({ navigation, route }) {
   const endedRef = useRef(false);
   const protectionReadyRef = useRef(false);
   const testNoticeSentRef = useRef(false);
+  const [preparingAttachment, setPreparingAttachment] = useState(false);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [vaultPickerOpen, setVaultPickerOpen] = useState(false);
   const vaultSends = useRef(new Map());
@@ -746,12 +747,26 @@ export default function ChatScreen({ navigation, route }) {
             </View>
           </View>
 
-          {chatMode === 'random' && <View style={[styles.savingRow, { flexWrap: 'wrap' }]}>
-            <Text style={[typography.caption, { color: colors.text, width: '100%' }]}>You are talking to a stranger. Enable media only with someone you trust.</Text>
-            <TouchableOpacity style={{ padding: sp.sm }} onPress={blockStranger}><Text style={{ color: colors.accent }}>Block / Skip</Text></TouchableOpacity>
-            <TouchableOpacity disabled={chatLocked || hasMediaConsent()} style={{ padding: sp.sm }} onPress={async () => {
-              try { await enableMedia(); setMediaConsentVersion(v => v + 1); } catch { Alert.alert('Cannot enable media', 'Please retry when connected.'); }
-            }}><Text style={{ color: colors.accent }}>{canExchangeMedia() ? 'Media enabled' : hasMediaConsent() ? 'Waiting for peer media consent' : 'Enable media this chat'}</Text></TouchableOpacity>
+          {chatMode === 'random' && <View style={{ marginHorizontal: horizontalPadding, marginVertical: 8, padding: 14, borderRadius: 18, backgroundColor: colors.surface2 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              <Icon name={canExchangeMedia() ? 'images-outline' : 'shield-checkmark-outline'} size={24} color={colors.accent} />
+              <View style={{ flex: 1 }}>
+                <Text style={[typography.bodyStrong, { color: colors.text }]}>{canExchangeMedia() ? 'Media sharing is on' : 'Choose when to share media'}</Text>
+                <Text style={[typography.caption, { color: colors.textSecondary, marginTop: 3 }]}>{canExchangeMedia() ? 'You and your peer can send attachments.' : hasMediaConsent() ? 'Waiting for your peer to enable media.' : 'Both people must agree before sending attachments.'}</Text>
+              </View>
+            </View>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10, marginTop: 12 }}>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Block or skip this person" onPress={blockStranger}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 6, padding: 12, borderRadius: 12, backgroundColor: colors.surface1 }}>
+                <Icon name="play-skip-forward-outline" size={18} /><Text style={{ color: colors.text }}>Skip / Block</Text>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Enable media for this chat" disabled={chatLocked || hasMediaConsent()}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 6, padding: 12, borderRadius: 12, backgroundColor: hasMediaConsent() ? colors.accentTint : colors.accent, opacity: chatLocked ? 0.5 : 1 }}
+                onPress={async () => { try { await enableMedia(); setMediaConsentVersion(v => v + 1); } catch { Alert.alert('Cannot enable media', 'Please retry when connected.'); } }}>
+                <Icon name={canExchangeMedia() ? 'checkmark-circle' : hasMediaConsent() ? 'time-outline' : 'images-outline'} size={18} color={hasMediaConsent() ? colors.accent : '#fff'} />
+                <Text style={{ color: hasMediaConsent() ? colors.accent : '#fff', fontWeight: '600' }}>{canExchangeMedia() ? 'Enabled' : hasMediaConsent() ? 'Waiting for peer' : 'Enable media'}</Text>
+              </TouchableOpacity>
+            </View>
           </View>}
           {isExpoGoFeatureTest && <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: colors.warningTint }]}>
             <Text style={[typography.caption, { color: colors.text }]}>Expo Go feature test</Text>
@@ -760,9 +775,9 @@ export default function ChatScreen({ navigation, route }) {
 
           <View style={[styles.savingRow, { borderBottomColor: colors.separator }]}>
             <View style={styles.flex}>
-              <Text style={[typography.caption, { color: colors.text }]}>Allow saving privately in Whisper</Text>
+              <Text style={[typography.caption, { color: colors.text }]}>Allow downloads</Text>
               <Text style={[typography.micro, { color: colors.textSecondary }]}>
-                {isExpoGoFeatureTest ? 'Applies to new attachments. Native privacy checks are unavailable in this test.' : 'Applies to new attachments. Screen protection stays on.'}
+                {isExpoGoFeatureTest ? 'Applies to new attachments. Native privacy checks are unavailable in this test.' : 'Your peer can save new attachments privately in Whisper.'}
               </Text>
             </View>
             <Switch value={allowSaving} onValueChange={changeSavingPolicy}
@@ -792,6 +807,11 @@ export default function ChatScreen({ navigation, route }) {
             onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
           />
 
+          {preparingAttachment && <View accessibilityRole="progressbar" accessibilityLabel="Preparing attachment"
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: horizontalPadding, paddingVertical: 12, backgroundColor: colors.surface1 }}>
+            <ActivityIndicator size="small" color={colors.accent} />
+            <Text style={[typography.caption, { color: colors.textSecondary }]}>Preparing attachment...</Text>
+          </View>}
           {messages.filter(message => ['image', 'video', 'file'].includes(message.type) && message.delivery === 'sending').map(message => (
             <View key={`transfer-${message.id}`} style={[styles.savingRow, { borderBottomColor: colors.separator }]}>
               <Text style={[styles.flex, typography.caption, { color: colors.text }]}>
@@ -820,6 +840,7 @@ export default function ChatScreen({ navigation, route }) {
             },
           ]}>
             <MediaPickerButton
+              onPreparingChange={setPreparingAttachment}
               onOpenCamera={openCamera}
               onProcessingChange={(active) => { externalMediaRef.current = active; }}
               onOpenVault={() => setVaultPickerOpen(true)}

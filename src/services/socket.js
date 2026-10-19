@@ -51,7 +51,7 @@ let receiveSequence = 0;
 const receivedSequences = new Set();
 let sessionEpoch = 0;
 let activeRoomId = null;
-let allowSavingMyMedia = false;
+let allowSavingMyMedia = true;
 let randomChat = false, localMediaConsent = false, peerMediaConsent = false;
 export const canExchangeMedia = () => !randomChat || (localMediaConsent && peerMediaConsent);
 export const hasMediaConsent = () => localMediaConsent;
@@ -414,7 +414,7 @@ export function resetE2E() {
   receivedSequences.clear();
   sessionEpoch += 1;
   activeRoomId = null;
-  allowSavingMyMedia = false; randomChat = false; localMediaConsent = false; peerMediaConsent = false;
+  allowSavingMyMedia = true; randomChat = false; localMediaConsent = false; peerMediaConsent = false;
   for (const cancel of [...pendingRequests]) cancel();
   queuedCharacters = 0;
   queuedMessages = 0;

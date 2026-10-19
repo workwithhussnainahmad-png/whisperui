@@ -18,3 +18,12 @@
 5. Join with QR: dismiss by backdrop/back/X, scan by camera, import from Photos on Android/iOS, and test large text and bottom safe areas.
 
 Changes are local source; install/run an updated app to see them. Existing unrelated native build changes were preserved.
+
+## Follow-up: composer, consent and defaults
+- Attachment preparation now reports its own state to ChatScreen. The indicator appears above the composer and is removed in the preparation cleanup path; it no longer changes the + button layout. External-picker lifecycle tracking remains separate.
+- Random media consent uses a styled card with icon buttons and clear enabled/waiting states. Both peers still opt in before media exchange.
+- Allow downloads starts enabled in both UI and transport state for each new chat. It still means saving privately in Whisper, and can be disabled for subsequent attachments.
+- Camera photo capture requests shutterSound=false. No app-added video recording sound is used; recorded microphone audio is preserved. Device-enforced capture sounds require physical-device verification and cannot be guaranteed silent by this setting.
+- Both repositories use six-character codes from 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ. Backend uses crypto.randomInt(36), avoiding modulo bias. UI displays the six characters without punctuation; pasted spaces/dashes remain accepted as formatting. Underscores are rejected. Update backend and app together; already-issued underscore codes are incompatible with this validator.
+- Verification: 23 backend tests, 89 mobile tests, and both two-client integrations passed. Tests cover all 36 characters, rejection of underscores, and default saving permission on received attachments.
+- Device checks: prepare/cancel/send attachments in both chat modes and confirm the composer stays aligned; try both media-consent states; confirm downloads default on and switching off applies to new files; check camera sound with device silent mode on/off; create/join/scan codes containing 0, 1, I, L, and O.

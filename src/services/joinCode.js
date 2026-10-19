@@ -4,9 +4,9 @@ export function normalizeJoinCode(value) {
   let text = value.trim();
   if (/^whisperchat:\/\/join\//i.test(text)) text = text.slice('whisperchat://join/'.length);
   const code = text.toUpperCase().replace(/[-\s]/g, '');
-  return /^[2-9A-HJKMNP-Z_]{6}$/.test(code) ? code : null;
+  return /^[0-9A-Z]{6}$/.test(code) ? code : null;
 }
 export function displayJoinCode(value) {
   const code = normalizeJoinCode(value);
-  return code ? code.slice(0, 3) + '-' + code.slice(3) : '';
+  return code || '';
 }

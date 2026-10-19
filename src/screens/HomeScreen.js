@@ -475,7 +475,7 @@ export default function HomeScreen({ navigation }) {
                   <View style={s.joinRow}>
                     <TextInput
                       style={[s.joinInput, { backgroundColor: colors.surface2, borderColor: colors.border, color: colors.text }]}
-                      placeholder="ABC-DEF"
+                      placeholder="ABC123"
                       placeholderTextColor={colors.textTertiary}
                       value={inviteCode}
                       onChangeText={(value) => {

@@ -175,6 +175,7 @@ for (const mode of ['invite', 'random']) test(`real mobile clients establish ${m
     await alice.api.sendFile(content.toString('base64'), 'application/octet-stream', 'example.bin', content.length, crypto.randomUUID(), undefined, new AbortController().signal);
     assert.deepEqual(processingErrors, []);
     assert.equal(completed.length, 1);
+    assert.equal(completed[0].allowSaving, true, 'new chats allow private saving by default');
     const receivedFile = bob.vault.get(completed[0].fileUri);
     assert.equal(bob.files.get(receivedFile.uri).includes(content.subarray(0, 100)), false);
     const reader = receivedFile.open(); const received = [];

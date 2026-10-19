@@ -52,7 +52,7 @@ export default function ChatCamera({ onDone }) {
       if (mode === 'video') setRecording(true);
       const result = mode === 'video'
         ? await camera.current.recordAsync()
-        : await camera.current.takePictureAsync({ quality: 1, exif: false });
+        : await camera.current.takePictureAsync({ quality: 1, exif: false, shutterSound: false });
       if (!result?.uri) throw new Error('Capture returned no media');
       if (!active.current) { await remove(result.uri); return; }
       owned.current = result.uri;

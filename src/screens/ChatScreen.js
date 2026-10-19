@@ -5,19 +5,20 @@ import {
   ActivityIndicator, AppState, Keyboard, Switch, DeviceEventEmitter,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
+import { KeyboardAvoidingView, KeyboardEvents } from 'react-native-keyboard-controller';
 import {
   blockPeer, enableMedia, canExchangeMedia, hasMediaConsent, getSocket, sendMessage, sendImage, sendVideo, sendFile, sendVaultFile, leaveRoom, reportUser,
   startKeyExchange, isE2EReady, ensureKeypair, resetE2E, configureChatSecurity,
   confirmSecureChannel, canSendMessages, decryptIncoming, sendTyping,
   createMessageId, sendReceipt, setMediaSavingAllowed, sendSecurityNotice,
-  getChatEpoch, isChatEpochActive, sendHeartbeat,
+  getChatEpoch, isChatEpochActive, sendHeartbeat, sendMediaUpgrade, sendKeyConfirmation,
 } from '../services/socket';
+import { deleteAttachment } from '../services/attachmentFiles';
 import {
   addScreenshotListener,
 } from 'expo-screen-capture';
 import { ensureCaptureProtection, isScreenBeingCaptured, observeCaptureState, isExpoGoFeatureTest } from '../services/captureProtection';
-import { saveToVault, vaultError, getVaultLockState } from '../services/privateVault';
+import { saveToVault, deleteSavedFile, vaultError, getVaultLockState } from '../services/privateVault';
 import { startPeerLiveness } from '../services/peerLiveness';
 import {
   deriveSharedKey,
@@ -30,6 +31,8 @@ import AttachmentViewer from '../components/AttachmentViewer';
 import MediaPickerButton from '../components/MediaPickerButton';
 import VaultAttachmentPicker from '../components/VaultAttachmentPicker';
 import ChatCamera from '../components/ChatCamera';
+import VoiceRecordButton from '../components/VoiceRecordButton';
+import { prepareAttachment } from '../services/prepareAttachment';
 import ScreenContainer from '../components/ScreenContainer';
 import SafetyVerifyOverlay from '../components/SafetyVerifyOverlay';
 import TypingIndicator from '../components/TypingIndicator';
@@ -40,9 +43,12 @@ import { useTheme } from '../hooks/useTheme';
 import { useResponsiveLayout } from '../hooks/useResponsiveLayout';
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2);
-const MAX_RENDERED_MESSAGES = 200;
-const MAX_RENDERED_MEDIA_CHARS = 12_000_000;
+const MAX_RENDERED_MESSAGES = 120;
+const MAX_RENDERED_MEDIA_CHARS = 8_000_000;
 const BACKGROUND_LEAVE_GRACE_MS = 4000;
+const HANDSHAKE_AUTO_RETRY_MS = 7000;
+const HANDSHAKE_SLOW_MS = 15000;
+const PROOF_RESEND_MIN_MS = 3000;
 
 function appendBoundedMessage(previous, message) {
   const candidates = [...previous, message].slice(-MAX_RENDERED_MESSAGES);
@@ -79,7 +85,9 @@ export default function ChatScreen({ navigation, route }) {
   const [safetyCode, setSafetyCode] = useState(null);
   const [peerTyping, setPeerTyping] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [avoidKeyboard, setAvoidKeyboard] = useState(false);
   const [privacyOverlayVisible, setPrivacyOverlayVisible] = useState(false);
+  const [contentHidden, setContentHidden] = useState(false);
   const [pendingDropped, setPendingDropped] = useState(false);
   const [allowSaving, setAllowSaving] = useState(true);
   const [changingPolicy, setChangingPolicy] = useState(false);
@@ -92,6 +100,12 @@ export default function ChatScreen({ navigation, route }) {
   const pendingEncryptedRef = useRef([]);
   const pendingKeyConfirmationRef = useRef(null);
   const peerKeyConfirmedRef = useRef(false);
+  const acceptingProofRef = useRef(false);
+  const ownProofRef = useRef(null);
+  const retryHandshakeRef = useRef(null);
+  const [securingSlow, setSecuringSlow] = useState(false);
+  const [securingNotice, setSecuringNotice] = useState(null);
+  const [handshakeAttempt, setHandshakeAttempt] = useState(0);
   const authFailureShownRef = useRef(false);
   const typingActiveRef = useRef(false);
   const typingIdleRef = useRef(null);
@@ -105,12 +119,35 @@ export default function ChatScreen({ navigation, route }) {
   const [vaultPickerOpen, setVaultPickerOpen] = useState(false);
   const vaultSends = useRef(new Map());
   const [mediaConsentVersion, setMediaConsentVersion] = useState(0);
-  useEffect(() => () => { for (const controller of vaultSends.current.values()) controller.abort(); vaultSends.current.clear(); }, []);
+  const [sendHd, setSendHd] = useState(true);
+  const [voiceState, setVoiceState] = useState(null);
+  const voiceHintTimer = useRef(null);
+  useEffect(() => () => clearTimeout(voiceHintTimer.current), []);
+  const messagesRef = useRef([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  // HD replacements upload one at a time, after ordinary sends, so the quick
+  // standard copies are never delayed by them.
+  const upgradeQueueRef = useRef([]);
+  const currentUpgradeRef = useRef(null);
+  const primarySendsRef = useRef(0);
+  const savedVaultIdsRef = useRef(new Map());
+  const savingIdsRef = useRef(new Set());
+  const deferredUpgradesRef = useRef(new Map());
+  const stopUpgrades = () => {
+    upgradeQueueRef.current = [];
+    currentUpgradeRef.current?.controller.abort();
+  };
+  useEffect(() => () => {
+    for (const controller of vaultSends.current.values()) controller.abort();
+    vaultSends.current.clear();
+    stopUpgrades();
+  }, []);
   const cameraResolver = useRef(null);
   const closeCamera = (asset = null) => {
     const resolve = cameraResolver.current;
     cameraResolver.current = null;
     setCameraOpen(false);
+    syncKeyboard();
     resolve?.(asset);
   };
   const openCamera = () => new Promise((resolve) => {
@@ -123,7 +160,8 @@ export default function ChatScreen({ navigation, route }) {
   const externalMediaRef = useRef(false);
   const livenessRef = useRef(null);
 
-  const chatLocked = securing || !verified || !protectionReady || privacyOverlayVisible;
+  const sessionLocked = securing || !verified || !protectionReady;
+  const chatLocked = sessionLocked || privacyOverlayVisible;
   const canSend = canSendMessages() && !chatLocked;
 
   const updateDelivery = (messageId, delivery) => {
@@ -158,6 +196,7 @@ export default function ChatScreen({ navigation, route }) {
         return;
       }
       sendReceipt(msg.messageId).catch(() => {});
+      if (msg.replaces) { applyUpgrade(msg); return; }
       if (msg.type === 'media-policy' || msg.type === 'security-notice') {
         const notice = msg.type === 'media-policy'
           ? (msg.allowSaving ? 'Peer allows saving attachments they send from now on.' : 'Peer disabled saving for new attachments.')
@@ -245,6 +284,7 @@ export default function ChatScreen({ navigation, route }) {
     setViewing(null);
     setVaultPickerOpen(false);
     for (const controller of vaultSends.current.values()) controller.abort();
+    stopUpgrades();
     setText('');
     setVerified(false);
     setAllowSaving(false);
@@ -292,17 +332,38 @@ export default function ChatScreen({ navigation, route }) {
       finishChat('connection_lost');
     };
 
+    const sendOwnProof = async (proof) => {
+      await startKeyExchange();
+      if (!stillActive()) return;
+      ownProofRef.current = { proof, sentAt: Date.now() };
+      await sendKeyConfirmation(proof);
+    };
+
+    // A peer that resends its key is still waiting, so our earlier proof may
+    // have been lost. Duplicates are ignored by the receiver.
+    const resendOwnProof = () => {
+      const own = ownProofRef.current;
+      if (!own || Date.now() - own.sentAt < PROOF_RESEND_MIN_MS) return;
+      sendOwnProof(own.proof).catch(() => {});
+    };
+
     const acceptPeerKeyConfirmation = async (proof) => {
       if (!stillActive()) return;
-      if (peerKeyConfirmedRef.current) return;
-      if (!(await verifyKeyConfirmation(proof, roomId))) {
-        failKeyConfirmation();
-        return;
+      if (peerKeyConfirmedRef.current || acceptingProofRef.current) return;
+      acceptingProofRef.current = true;
+      try {
+        if (!(await verifyKeyConfirmation(proof, roomId))) {
+          failKeyConfirmation();
+          return;
+        }
+        peerKeyConfirmedRef.current = true;
+      } finally {
+        acceptingProofRef.current = false;
       }
-      peerKeyConfirmedRef.current = true;
       const reply = await createKeyConfirmation(roomId);
       if (!stillActive()) return;
-      if (reply) socket.emit('key-confirm', { proof: reply });
+      if (reply) await sendOwnProof(reply);
+      if (!stillActive()) return;
       const code = await getSafetyCode();
       if (!stillActive()) return;
       setSafetyCode(code);
@@ -321,13 +382,21 @@ export default function ChatScreen({ navigation, route }) {
         if (!stillActive()) return;
         const proof = await createKeyConfirmation(roomId);
         if (!stillActive()) return;
-        if (proof) socket.emit('key-confirm', { proof });
+        if (proof) await sendOwnProof(proof);
+        else resendOwnProof();
+        if (!stillActive()) return;
         const pendingProof = pendingKeyConfirmationRef.current;
         pendingKeyConfirmationRef.current = null;
         if (pendingProof) await acceptPeerKeyConfirmation(pendingProof);
       } catch {
         failKeyConfirmation();
       }
+    };
+
+    retryHandshakeRef.current = () => {
+      if (!stillActive()) return;
+      startKeyExchange({ resend: true }).catch(() => {});
+      resendOwnProof();
     };
 
     const onPeerKeyConfirmation = async (d) => {
@@ -365,7 +434,7 @@ export default function ChatScreen({ navigation, route }) {
     };
 
     const onPeerReady = () => {
-      if (stillActive()) startKeyExchange().catch(failKeyConfirmation);
+      if (stillActive()) startKeyExchange({ resend: true }).catch(failKeyConfirmation);
     };
 
     const onRateLimited = (d) => {
@@ -377,6 +446,7 @@ export default function ChatScreen({ navigation, route }) {
         'chat-ready': 'chat ready',
       };
       const action = labels[d?.action] || 'action';
+      if (!verifiedRef.current) setSecuringNotice(`The ${action} rate limit was reached. Please wait a minute and retry.`);
       setMessages((p) => appendBoundedMessage(p, {
         id: uid(),
         type: 'system',
@@ -452,7 +522,11 @@ export default function ChatScreen({ navigation, route }) {
     const appStateSub = AppState.addEventListener('change', (state) => {
       if (!inChatRef.current) return;
       if (state === 'active' && livenessRef.current && !livenessRef.current.check()) return;
+      // "inactive" includes our own biometric prompt; the cover hides content,
+      // but tearing the list down would force every preview to decrypt again.
       setPrivacyOverlayVisible(state !== 'active');
+      if (state === 'background') setContentHidden(true);
+      else if (state === 'active') { setContentHidden(false); syncKeyboard(); }
       if (state === 'background' && inChatRef.current && socket?.connected && !externalMediaRef.current) {
         if (backgroundTimerRef.current) clearTimeout(backgroundTimerRef.current);
         const leaveAfterAuthentication = () => {
@@ -486,6 +560,9 @@ export default function ChatScreen({ navigation, route }) {
       pendingEncryptedRef.current = [];
       pendingKeyConfirmationRef.current = null;
       peerKeyConfirmedRef.current = false;
+      acceptingProofRef.current = false;
+      ownProofRef.current = null;
+      retryHandshakeRef.current = null;
       verifiedRef.current = false;
       socket.off('peer-key', onPeerKey);
       socket.off('peer-key-confirm', onPeerKeyConfirmation);
@@ -506,6 +583,22 @@ export default function ChatScreen({ navigation, route }) {
   }, [roomId, navigation, chatMode]);
 
   useEffect(() => {
+    setSecuringSlow(false);
+    if (!securing) { setSecuringNotice(null); return undefined; }
+    const retry = handshakeAttempt === 0
+      ? setTimeout(() => retryHandshakeRef.current?.(), HANDSHAKE_AUTO_RETRY_MS)
+      : null;
+    const slow = setTimeout(() => setSecuringSlow(true), HANDSHAKE_SLOW_MS);
+    return () => { clearTimeout(retry); clearTimeout(slow); };
+  }, [securing, handshakeAttempt]);
+
+  const retryHandshake = () => {
+    setSecuringNotice(null);
+    retryHandshakeRef.current?.();
+    setHandshakeAttempt((n) => n + 1);
+  };
+
+  useEffect(() => {
     if (messages.length > lastCountRef.current) {
       lastCountRef.current = messages.length;
       requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));
@@ -517,14 +610,37 @@ export default function ChatScreen({ navigation, route }) {
     const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
     const show = Keyboard.addListener(showEvent, () => {
       setKeyboardVisible(true);
+      setAvoidKeyboard(true);
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50);
     });
     const hide = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    const hidden = Keyboard.addListener('keyboardDidHide', () => setAvoidKeyboard(false));
+    const willShow = KeyboardEvents.addListener('keyboardWillShow', () => setAvoidKeyboard(true));
+    const didHide = KeyboardEvents.addListener('keyboardDidHide', () => setAvoidKeyboard(false));
     return () => {
       show.remove();
       hide.remove();
+      hidden.remove();
+      willShow.remove();
+      didHide.remove();
     };
   }, []);
+
+  // Full-screen overlays can swallow the keyboard's hide animation, which
+  // otherwise leaves keyboard-sized padding under the input bar.
+  const syncKeyboard = () => requestAnimationFrame(() => {
+    if (Keyboard.isVisible()) return;
+    setKeyboardVisible(false);
+    setAvoidKeyboard(false);
+  });
+  const openViewer = (message) => {
+    Keyboard.dismiss();
+    setViewing(message);
+  };
+  const closeViewer = () => {
+    setViewing(null);
+    syncKeyboard();
+  };
 
   const handleVerify = async () => {
     try {
@@ -552,12 +668,22 @@ export default function ChatScreen({ navigation, route }) {
     const epoch = getChatEpoch();
     externalMediaRef.current = true;
     if (backgroundTimerRef.current) clearTimeout(backgroundTimerRef.current);
+    savingIdsRef.current.add(message.id);
+    let saved = null;
     try {
-      const saved = await saveToVault(message, () => inChatRef.current && isChatEpochActive(epoch));
+      saved = await saveToVault(message, () => inChatRef.current && isChatEpochActive(epoch));
+      if (saved?.id) savedVaultIdsRef.current.set(message.id, saved.id);
       if (saved && inChatRef.current) Alert.alert('Saved privately', 'The file is saved privately in Whisper. Open Saved Files from Home to view it.');
     } catch (error) {
       if (inChatRef.current) Alert.alert('Unable to save privately', vaultError(error));
     } finally {
+      savingIdsRef.current.delete(message.id);
+      const deferred = deferredUpgradesRef.current.get(message.id);
+      if (deferred) {
+        deferredUpgradesRef.current.delete(message.id);
+        deleteAttachment(deferred.oldUri);
+        if (saved) upgradeSavedCopy(message.id, deferred.upgraded);
+      }
       externalMediaRef.current = false;
       if (inChatRef.current && AppState.currentState !== 'active') {
         if (backgroundTimerRef.current) clearTimeout(backgroundTimerRef.current);
@@ -600,9 +726,119 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  const updateProgress = (messageId) => (progress, sendStage) => {
+  const updateProgress = (messageId) => {
+    let lastPercent = -1, lastStage;
+    return (progress, sendStage) => {
+      if (!inChatRef.current || endedRef.current) return;
+      const percent = Math.round(progress * 100);
+      if (percent === lastPercent && sendStage === lastStage) return;
+      lastPercent = percent; lastStage = sendStage;
+      setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress, sendStage } : message));
+    };
+  };
+
+  const patchMessage = (id, patch) => {
     if (!inChatRef.current || endedRef.current) return;
-    setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress, sendStage } : message));
+    setMessages((previous) => previous.map((message) => message.id === id ? { ...message, ...patch } : message));
+  };
+  const notify = (text) => {
+    if (!inChatRef.current || endedRef.current) return;
+    setMessages((p) => appendBoundedMessage(p, { id: uid(), type: 'system', text, isSent: false, ts: Date.now() }));
+  };
+
+  // Ordinary sends take priority. The transport allows two concurrent
+  // attachments, so a second ordinary send pauses (and later restarts) HD.
+  const beginPrimarySend = async () => {
+    primarySendsRef.current += 1;
+    const current = currentUpgradeRef.current;
+    if (current && primarySendsRef.current >= 2) {
+      current.preempted = true;
+      current.controller.abort();
+      await current.done;
+    }
+  };
+  const endPrimarySend = () => {
+    primarySendsRef.current -= 1;
+    pumpUpgrades();
+  };
+  const pumpUpgrades = () => {
+    if (!inChatRef.current || endedRef.current || currentUpgradeRef.current || primarySendsRef.current > 0) return;
+    const job = upgradeQueueRef.current.shift();
+    if (!job) return;
+    const current = { job, controller: new AbortController(), preempted: false };
+    currentUpgradeRef.current = current;
+    current.done = (async () => {
+      let lastPercent = -1;
+      try {
+        patchMessage(job.replaces, { hdStage: 'sending', hdProgress: 0 });
+        await sendMediaUpgrade(job.type, job.payload, job.payload.mimeType, job.replaces, createMessageId(), (progress) => {
+          const percent = Math.round(progress * 100);
+          if (percent === lastPercent) return;
+          lastPercent = percent;
+          patchMessage(job.replaces, { hdStage: 'sending', hdProgress: progress });
+        }, current.controller.signal);
+        const previous = messagesRef.current.find((message) => message.id === job.replaces);
+        patchMessage(job.replaces, { hdStage: 'done', fileUri: job.payload.fileUri, fileSize: job.payload.fileSize, mimeType: job.payload.mimeType });
+        if (previous?.fileUri && previous.fileUri !== job.payload.fileUri) deleteAttachment(previous.fileUri);
+      } catch {
+        if (current.preempted && inChatRef.current && !endedRef.current) {
+          upgradeQueueRef.current.unshift(job);
+          patchMessage(job.replaces, { hdStage: 'waiting' });
+        } else {
+          deleteAttachment(job.payload.fileUri);
+          patchMessage(job.replaces, { hdStage: undefined });
+        }
+      } finally {
+        currentUpgradeRef.current = null;
+        setTimeout(pumpUpgrades, 0);
+      }
+    })();
+  };
+  const queueUpgrade = (type, upgrade, replaces, delivered) => {
+    upgrade?.then((full) => {
+      if (full && delivered && inChatRef.current && !endedRef.current) {
+        upgradeQueueRef.current.push({ type, payload: full, replaces });
+        pumpUpgrades();
+        return;
+      }
+      if (full) deleteAttachment(full.fileUri);
+      patchMessage(replaces, { hdStage: undefined });
+    });
+  };
+
+  const upgradeSavedCopy = async (id, upgraded) => {
+    const savedId = savedVaultIdsRef.current.get(id);
+    if (!savedId || upgraded.allowSaving !== true || !inChatRef.current) return;
+    // Never trigger an unexpected unlock prompt for a background upgrade.
+    if (getVaultLockState().locked) { notify('An HD version arrived. Save it again to keep HD in Saved Files.'); return; }
+    const epoch = getChatEpoch();
+    try {
+      const saved = await saveToVault(upgraded, () => inChatRef.current && isChatEpochActive(epoch));
+      if (!saved?.id) return;
+      savedVaultIdsRef.current.set(id, saved.id);
+      await deleteSavedFile(savedId).catch(() => {});
+      notify('Saved Files now has the HD version.');
+    } catch {
+      notify('An HD version arrived but could not replace your saved copy. Save it again to keep HD.');
+    }
+  };
+  // Receiver: swap the standard copy for the HD file in the same bubble.
+  const applyUpgrade = (msg) => {
+    const original = messagesRef.current.find((message) => message.id === msg.replaces);
+    if (!original || original.isSent || original.type !== msg.type || original.hd || !original.fileUri) {
+      deleteAttachment(msg.fileUri); return;
+    }
+    const patch = { fileUri: msg.fileUri, fileSize: msg.fileSize, mimeType: msg.mimeType, allowSaving: msg.allowSaving, hd: true };
+    const upgraded = { ...original, ...patch };
+    messagesRef.current = messagesRef.current.map((message) => message.id === original.id ? upgraded : message);
+    patchMessage(original.id, patch);
+    setViewing((current) => current?.id === original.id ? { ...current, ...patch } : current);
+    if (savingIdsRef.current.has(original.id)) {
+      deferredUpgradesRef.current.set(original.id, { oldUri: original.fileUri, upgraded });
+      return;
+    }
+    deleteAttachment(original.fileUri);
+    upgradeSavedCopy(original.id, upgraded);
   };
 
   const sendSavedFile = async (item) => {
@@ -615,10 +851,12 @@ export default function ChatScreen({ navigation, route }) {
     const type = item.mime.startsWith('image/') ? 'image' : item.mime.startsWith('video/') ? 'video' : 'file';
     setMessages((p) => appendBoundedMessage(p, { id: messageId, type, vaultId: item.id, fileName: item.name,
       mimeType: item.mime, fileSize: item.size, isSent: true, ts: Date.now(), delivery: 'sending', sendStage: 'checking', progress: 0 }));
+    await beginPrimarySend();
     try {
+      const reportProgress = updateProgress(messageId);
       await sendVaultFile(item.id, messageId, (progress, sendStage) => {
         if (!inChatRef.current || !isChatEpochActive(epoch)) return;
-        setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress, sendStage } : message));
+        reportProgress(progress, sendStage);
       }, controller.signal);
       updateDelivery(messageId, 'delivered');
     } catch (error) {
@@ -627,28 +865,63 @@ export default function ChatScreen({ navigation, route }) {
         Alert.alert(controller.signal.aborted ? 'Send cancelled' : 'Saved file send status', controller.signal.aborted
           ? 'Sending stopped. Your saved file is unchanged.' : vaultError(error));
       }
-    } finally { vaultSends.current.delete(messageId); }
+    } finally { vaultSends.current.delete(messageId); endPrimarySend(); }
   };
 
-  const sendPicked = async (type, payload) => {
-    if (!canSendMessages() || endedRef.current || !protectionReadyRef.current) return;
-    const messageId = createMessageId(), controller = new AbortController();
+  const sendPicked = async (type, payload, upgrade) => {
+    const messageId = createMessageId();
+    if (!canSendMessages() || endedRef.current || !protectionReadyRef.current) { queueUpgrade(type, upgrade, messageId, false); return; }
+    const controller = new AbortController();
     vaultSends.current.set(messageId, controller);
     setMessages(p => appendBoundedMessage(p, { id: messageId, type, ...payload,
-      isSent: true, ts: Date.now(), delivery: 'sending', sendStage: 'sending', progress: 0 }));
+      isSent: true, ts: Date.now(), delivery: 'sending', sendStage: 'sending', progress: 0, ...(upgrade ? { hdStage: 'waiting' } : {}) }));
+    let delivered = false;
+    await beginPrimarySend();
     try {
       const data = payload.fileUri ? payload : payload[`${type}Data`];
       if (type === 'file') await sendFile(data, payload.mimeType, payload.fileName, payload.fileSize, messageId, updateProgress(messageId), controller.signal);
       else await (type === 'image' ? sendImage : sendVideo)(data, payload.mimeType, messageId, updateProgress(messageId), controller.signal);
       updateDelivery(messageId, 'delivered');
+      delivered = true;
     } catch (error) {
       updateDelivery(messageId, controller.signal.aborted ? 'cancelled' : 'failed');
       if (!controller.signal.aborted && inChatRef.current) Alert.alert('Send failed', error.message || 'Please try again.');
-    } finally { vaultSends.current.delete(messageId); }
+    } finally {
+      vaultSends.current.delete(messageId);
+      endPrimarySend();
+      queueUpgrade(type, upgrade, messageId, delivered);
+    }
   };
-  const doImg = payload => sendPicked('image', payload);
-  const doVid = payload => sendPicked('video', payload);
+  const doImg = (payload, upgrade) => sendPicked('image', payload, upgrade);
+  const doVid = (payload, upgrade) => sendPicked('video', payload, upgrade);
   const doFile = payload => sendPicked('file', payload);
+
+  const handleVoiceState = (state) => {
+    clearTimeout(voiceHintTimer.current);
+    setVoiceState(state);
+    if (state?.hint) voiceHintTimer.current = setTimeout(() => setVoiceState(null), 1800);
+  };
+
+  const sendVoice = async ({ uri, durationMs }) => {
+    if (!canSendMessages() || endedRef.current) return;
+    const epoch = getChatEpoch();
+    const isActive = () => inChatRef.current && isChatEpochActive(epoch);
+    setPreparingAttachment(true);
+    try {
+      const prepared = await prepareAttachment({ uri, mimeType: 'audio/mp4' }, isActive, (title, message) =>
+        new Promise((resolve) => Alert.alert(title, message, [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Send', onPress: () => resolve(true) },
+        ], { cancelable: true, onDismiss: () => resolve(false) })));
+      if (!prepared) return;
+      if (!isActive()) { deleteAttachment(prepared.fileUri); return; }
+      doFile({ ...prepared, fileName: 'Voice message.m4a', durationMs });
+    } catch (error) {
+      if (isActive()) Alert.alert('Voice message not sent', error?.message === 'Chat ended' ? 'The chat ended.' : 'The recording could not be prepared. Please try again.');
+    } finally {
+      if (inChatRef.current) setPreparingAttachment(false);
+    }
+  };
 
   const confirmLeave = () => Alert.alert('Leave chat?', 'This clears the conversation from this app. Files saved privately in Whisper remain in Saved Files.', [
     { text: 'Stay', style: 'cancel' },
@@ -687,7 +960,7 @@ export default function ChatScreen({ navigation, route }) {
           // Offset is distance from screen top to this view (SafeAreaView top inset),
           // not the bottom nav inset — using bottom under-lifts on gesture-nav devices.
           keyboardVerticalOffset={insets.top}
-          enabled
+          enabled={avoidKeyboard}
         >
           <View style={[
             styles.hdr,
@@ -794,15 +1067,20 @@ export default function ChatScreen({ navigation, route }) {
 
           <FlatList
             ref={listRef}
-            data={privacyOverlayVisible || !protectionReady ? [] : messages}
+            data={contentHidden || !protectionReady ? [] : messages}
             renderItem={({ item }) => <ChatBubble message={item} isSent={item.isSent}
-              onSave={saveMedia} onOpen={setViewing} onCancelSend={(id) => vaultSends.current.get(id)?.abort()} mediaActive={!chatLocked && !privacyOverlayVisible && !cameraOpen && !viewing && inChatRef.current} />}
+              onSave={saveMedia} onOpen={openViewer} onCancelSend={(id) => vaultSends.current.get(id)?.abort()} mediaActive={!sessionLocked && !contentHidden && !cameraOpen && inChatRef.current} />}
             keyExtractor={(i) => i.id}
             style={styles.list}
             contentContainerStyle={[styles.listContent, { paddingHorizontal: horizontalPadding }]}
             keyboardDismissMode="on-drag"
             keyboardShouldPersistTaps="handled"
             automaticallyAdjustKeyboardInsets={false}
+            removeClippedSubviews={Platform.OS === 'android'}
+            maxToRenderPerBatch={12}
+            updateCellsBatchingPeriod={50}
+            windowSize={7}
+            initialNumToRender={16}
           />
 
           {preparingAttachment && <View accessibilityRole="progressbar" accessibilityLabel="Preparing attachment"
@@ -834,9 +1112,26 @@ export default function ChatScreen({ navigation, route }) {
               onImageSelected={doImg}
               onVideoSelected={doVid}
               onFileSelected={doFile}
+              hd={sendHd}
               disabled={chatLocked || !canExchangeMedia()}
             />
-            <TextInput
+            {voiceState ? (
+              <View style={[styles.input, styles.voiceStrip, {
+                backgroundColor: colors.surface2,
+                borderRadius: isTablet ? 24 : 20,
+                minHeight: isTablet ? 48 : 40,
+              }]}>
+                {voiceState.recording ? <>
+                  <View style={[styles.voiceDot, { backgroundColor: voiceState.cancelling ? colors.textTertiary : colors.danger }]} />
+                  <Text style={[typography.bodyStrong, { color: colors.text, fontVariant: ['tabular-nums'] }]}>
+                    {`${Math.floor(voiceState.seconds / 60)}:${String(voiceState.seconds % 60).padStart(2, '0')}`}
+                  </Text>
+                  <Text style={[typography.caption, styles.flex, { color: voiceState.cancelling ? colors.danger : colors.textTertiary, textAlign: 'right' }]}>
+                    {voiceState.cancelling ? 'Release to cancel' : '‹ Slide to cancel'}
+                  </Text>
+                </> : <Text style={[typography.caption, { color: colors.textSecondary }]}>{voiceState.hint}</Text>}
+              </View>
+            ) : <TextInput
               style={[
                 styles.input,
                 {
@@ -862,29 +1157,42 @@ export default function ChatScreen({ navigation, route }) {
               autoComplete="off"
               importantForAutofill="noExcludeDescendants"
               editable={!chatLocked}
-            />
-            <TouchableOpacity
-              style={[
-                styles.sendBtn,
-                isTablet && styles.sendBtnTablet,
-                { backgroundColor: colors.accent },
-                (!text.trim() || !canSend) && { backgroundColor: colors.surface3 },
-              ]}
-              activeOpacity={0.7}
-              disabled={!text.trim() || !canSend}
-              onPress={doSend}
-              accessibilityRole="button"
-              accessibilityLabel="Send message"
-            >
-              <Icon name="send" size={isTablet ? 22 : 20} color={colors.bubbleSentText} style={{ marginLeft: 3 }} />
-            </TouchableOpacity>
+            />}
+            {text.trim() ? (
+              <TouchableOpacity
+                style={[
+                  styles.sendBtn,
+                  isTablet && styles.sendBtnTablet,
+                  { backgroundColor: canSend ? colors.accent : colors.surface3 },
+                ]}
+                activeOpacity={0.7}
+                disabled={!canSend}
+                onPress={doSend}
+                accessibilityRole="button"
+                accessibilityLabel="Send message"
+              >
+                <Icon name="send" size={isTablet ? 22 : 20} color={colors.bubbleSentText} style={{ marginLeft: 3 }} />
+              </TouchableOpacity>
+            ) : (
+              <View style={[styles.sendBtn, isTablet && styles.sendBtnTablet]}>
+                <VoiceRecordButton
+                  size={isTablet ? 44 : 36}
+                  color={colors.accent}
+                  idleColor={colors.surface3}
+                  disabled={!canSend || preparingAttachment}
+                  blockedMessage={canExchangeMedia() ? null : 'You and your peer must both enable media before sending voice messages.'}
+                  onRecorded={sendVoice}
+                  onStateChange={handleVoiceState}
+                />
+              </View>
+            )}
           </View>
         </KeyboardAvoidingView>
       </ScreenContainer>
 
       {vaultPickerOpen && !chatLocked && <VaultAttachmentPicker onSelect={sendSavedFile} onClose={() => setVaultPickerOpen(false)} />}
-      {viewing && !chatLocked && inChatRef.current && <AttachmentViewer
-        message={viewing} onClose={() => setViewing(null)} onSave={saveMedia} />}
+      {viewing && !sessionLocked && !contentHidden && inChatRef.current && <AttachmentViewer
+        message={viewing} onClose={closeViewer} onSave={saveMedia} />}
       {securing && (
         <View style={[styles.securingOverlay, { backgroundColor: isDark ? 'rgba(0,0,0,0.85)' : 'rgba(242,242,247,0.92)' }]}>
           <ActivityIndicator size="large" color={colors.accent} />
@@ -894,6 +1202,23 @@ export default function ChatScreen({ navigation, route }) {
           <Text style={[typography.body, { color: colors.textTertiary, marginTop: sp.xs }]}>
             Establishing end-to-end encryption…
           </Text>
+          {(securingSlow || securingNotice) && (
+            <View style={styles.securingHelp}>
+              <Text style={[typography.caption, { color: colors.textSecondary, textAlign: 'center' }]}>
+                {securingNotice || 'This is taking longer than usual. Your peer may have a slow connection.'}
+              </Text>
+              <View style={styles.securingActions}>
+                <TouchableOpacity accessibilityRole="button" onPress={retryHandshake}
+                  style={[styles.securingBtn, { backgroundColor: colors.accent }]}>
+                  <Text style={{ color: '#fff', fontWeight: '600' }}>Retry</Text>
+                </TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" onPress={() => { leaveRoom(); finishChat('connection_lost'); }}
+                  style={[styles.securingBtn, { backgroundColor: colors.surface2 }]}>
+                  <Text style={{ color: colors.text, fontWeight: '600' }}>Leave</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
         </View>
       )}
 
@@ -905,7 +1230,7 @@ export default function ChatScreen({ navigation, route }) {
         />
       )}
 
-      {cameraOpen && <ChatCamera onDone={closeCamera} />}
+      {cameraOpen && <ChatCamera onDone={closeCamera} hd={sendHd} onHdChange={setSendHd} />}
 
       {privacyOverlayVisible && (
         <View pointerEvents="auto" style={[styles.privacyOverlay, { backgroundColor: colors.surface }]}>
@@ -950,11 +1275,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 10,
   },
+  securingHelp: { marginTop: sp.lg, paddingHorizontal: sp.xl, alignItems: 'center', gap: sp.md },
+  securingActions: { flexDirection: 'row', gap: sp.sm },
+  securingBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: radius.md },
   privacyOverlay: {
     ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 30,
+    zIndex: 200,
+    elevation: 200,
   },
   list: { flex: 1 },
   listContent: { flexGrow: 1, justifyContent: 'flex-end', paddingVertical: sp.sm },
@@ -979,5 +1308,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   sendBtnTablet: { width: 44, height: 44, borderRadius: 22 },
+  voiceStrip: { flexDirection: 'row', alignItems: 'center', gap: sp.sm },
+  voiceDot: { width: 10, height: 10, borderRadius: 5 },
   barDisabled: { opacity: 0.5 },
 });

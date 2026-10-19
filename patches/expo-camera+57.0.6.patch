@@ -1,0 +1,40 @@
+﻿diff --git a/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt b/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
+index 999a22c..e34517e 100644
+--- a/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
++++ b/node_modules/expo-camera/android/src/main/java/expo/modules/camera/ExpoCameraView.kt
+@@ -504,6 +504,9 @@ class ExpoCameraView(
+     val imageCaptureBuilder = ImageCapture.Builder()
+       .setResolutionSelector(resolutionSelector)
+       .setFlashMode(currentFlashMode.mapToLens())
++      // Whisper patch: favour multi-frame noise reduction over shutter latency.
++      .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
++      .setJpegQuality(97)
+ 
+     if (currentFlashMode == FlashMode.SCREEN) {
+       previewView.screenFlash?.let { screenFlash ->
+diff --git a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+index 7a6568c..52958d4 100644
+--- a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
++++ b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+@@ -405,6 +405,8 @@ class CameraSessionManager: NSObject, DeviceDiscoveryDelegate {
+     session.beginConfiguration()
+     if session.canAddOutput(photoOutput) {
+       session.addOutput(photoOutput)
++      // Whisper patch: allow Deep Fusion / night processing for less noise.
++      photoOutput.maxPhotoQualityPrioritization = .quality
+       self.photoOutput = photoOutput
+     }
+ 
+diff --git a/node_modules/expo-camera/ios/Current/CameraPhotoCapture.swift b/node_modules/expo-camera/ios/Current/CameraPhotoCapture.swift
+index fc9a9bb..26ca3d4 100644
+--- a/node_modules/expo-camera/ios/Current/CameraPhotoCapture.swift
++++ b/node_modules/expo-camera/ios/Current/CameraPhotoCapture.swift
+@@ -102,7 +102,7 @@ class CameraPhotoCapture: NSObject, AVCapturePhotoCaptureDelegate {
+         photoSettings.isHighResolutionPhotoEnabled = true
+       }
+ 
+-      photoSettings.photoQualityPrioritization = .balanced
++      photoSettings.photoQualityPrioritization = photoOutput.maxPhotoQualityPrioritization
+ 
+       photoOutput.capturePhoto(with: photoSettings, delegate: self)
+     }

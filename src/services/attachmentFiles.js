@@ -137,7 +137,12 @@ export function encodeChunk(bytes) {
   for (let i = 0; i < bytes.length; i += 16384) result += String.fromCharCode(...bytes.subarray(i, i + 16384));
   return btoa(result);
 }
-export function decodeChunk(data) { return Uint8Array.from(atob(data), (char) => char.charCodeAt(0)); }
+export function decodeChunk(data) {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
 export function requireStorage(bytes) {
   if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > Paths.availableDiskSpace - STORAGE_RESERVE_BYTES) {
     throw new Error('Not enough private storage for this attachment');

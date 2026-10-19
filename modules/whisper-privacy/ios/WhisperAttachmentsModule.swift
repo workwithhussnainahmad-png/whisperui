@@ -91,6 +91,32 @@ public final class WhisperAttachmentsModule: Module {
       guard let jpeg = image.jpegData(compressionQuality: 0.85) else { throw self.invalid("Cannot render PDF") }
       return ["pageCount": document.pageCount, "image": jpeg.base64EncodedString()]
     }
+    // Returns nil when the source is already at or below the standard size.
+    AsyncFunction("transcodeVideo") { (inputUri: String) async throws -> String? in
+      guard let url = URL(string: inputUri), url.isFileURL else { throw self.invalid("Local video required") }
+      let asset = AVURLAsset(url: url)
+      guard let track = try await asset.loadTracks(withMediaType: .video).first else { throw self.invalid("Unsupported video") }
+      let size = try await track.load(.naturalSize)
+      if min(abs(size.width), abs(size.height)) <= 720 { return nil }
+      guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1280x720),
+            export.supportedFileTypes.contains(.mp4) else { throw self.invalid("Unsupported video codec") }
+      try self.preparePrivateStorage()
+      let output = FileManager.default.temporaryDirectory.appendingPathComponent("whisper-private-\(UUID().uuidString).mp4")
+      var retained = false
+      defer { if !retained { self.removeTemporary(output) } }
+      export.outputURL = output
+      export.outputFileType = .mp4
+      export.metadata = []
+      export.metadataItemFilter = .forSharing()
+      export.shouldOptimizeForNetworkUse = true
+      await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        export.exportAsynchronously { continuation.resume() }
+      }
+      guard export.status == .completed else { throw self.invalid("Video conversion failed") }
+      try self.protectTemporaryFile(output.absoluteString)
+      retained = true
+      return output.absoluteString
+    }
     AsyncFunction("cleanVideoFile") { (inputUri: String) async throws -> String in
       guard let url = URL(string: inputUri), url.isFileURL else { throw self.invalid("Local video required") }
       let asset = AVURLAsset(url: url)

@@ -35,8 +35,9 @@ export function commitMediaTransfer(id) {
   finishEncryptedAttachment(transfer.file.uri);
   clearTimeout(transfer.timer);
   incoming.delete(id);
-  const { type, mimeType, fileName, fileSize, allowSaving } = descriptor;
-  return { type, mimeType, fileName, fileSize, allowSaving, messageId: id, fileUri: transfer.file.uri };
+  const { type, mimeType, fileName, fileSize, allowSaving, replaces } = descriptor;
+  return { type, mimeType, fileName, fileSize, allowSaving, messageId: id, fileUri: transfer.file.uri,
+    ...(replaces ? { replaces } : {}) };
 }
 export function acceptMediaChunk(chunk) {
   let transfer = incoming.get(chunk.transferId);

@@ -7,10 +7,26 @@ import android.graphics.pdf.PdfRenderer
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Base64
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Presentation
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultEncoderFactory
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.VideoEncoderSettings
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.ByteArrayOutputStream
@@ -18,7 +34,12 @@ import java.io.File
 import java.nio.ByteBuffer
 
 private const val MAX_BYTES = 3_000_000
+// Keep in sync with the iOS AVAssetExportPreset1280x720 standard-quality copy.
+private const val SD_SHORT_SIDE = 720
+// Higher bitrate reduces grain on the quick preview copy; HD still follows.
+private const val SD_VIDEO_BITRATE = 3_500_000
 
+@androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 class WhisperAttachmentsModule : Module() {
   private var cleanupFailures = 0
   private fun removeTemporary(file: File) {
@@ -116,6 +137,55 @@ class WhisperAttachmentsModule : Module() {
           }
         } }
       } finally { bytes.fill(0); removeTemporary(file) }
+    }
+
+    // Returns null when the source is already at or below the standard size.
+    AsyncFunction("transcodeVideo") { inputUri: String, promise: Promise ->
+      val uri = Uri.parse(inputUri)
+      require(uri.scheme == "file" || uri.scheme == "content")
+      val retriever = MediaMetadataRetriever()
+      val shortSide = try {
+        retriever.setDataSource(context, uri)
+        val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+        val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+        require(width > 0 && height > 0) { "Unsupported video" }
+        minOf(width, height)
+      } finally { retriever.release() }
+      if (shortSide <= SD_SHORT_SIDE) {
+        promise.resolve(null)
+        return@AsyncFunction
+      }
+      val output = File.createTempFile("whisper-private-", ".mp4", context.cacheDir)
+      // Transformer must be created and driven on a Looper thread.
+      Handler(Looper.getMainLooper()).post {
+        try {
+          val encoder = DefaultEncoderFactory.Builder(context)
+            .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(SD_VIDEO_BITRATE).build())
+            .setEnableFallback(true)
+            .build()
+          val transformer = Transformer.Builder(context)
+            .setVideoMimeType(MimeTypes.VIDEO_H264)
+            .setAudioMimeType(MimeTypes.AUDIO_AAC)
+            .setEncoderFactory(encoder)
+            .addListener(object : Transformer.Listener {
+              override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                promise.resolve(Uri.fromFile(output).toString())
+              }
+              override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+                removeTemporary(output)
+                promise.reject("ERR_VIDEO_TRANSCODE", exportException.message ?: "Video conversion failed", exportException)
+              }
+            })
+            .build()
+          val item = EditedMediaItem.Builder(MediaItem.fromUri(uri))
+            .setEffects(Effects(listOf(), listOf(Presentation.createForShortSide(SD_SHORT_SIDE))))
+            .build()
+          transformer.start(item, output.absolutePath)
+        } catch (error: Exception) {
+          removeTemporary(output)
+          promise.reject("ERR_VIDEO_TRANSCODE", error.message ?: "Video conversion failed", error)
+        }
+      }
     }
 
     AsyncFunction("cleanVideoFile") { inputUri: String ->

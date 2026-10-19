@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Image, TouchableOpacity, ScrollView, StyleSheet, BackHandler, Alert } from 'react-native';
 import PrivateVideo from './PrivateVideo';
+import ZoomableImage from './ZoomableImage';
+import { acquireValidatedImage } from '../services/imagePreviewCache';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Icon from './Icon';
 import { acquireAttachmentFile, readAttachmentBase64, mediaExtension } from '../services/attachmentFiles';
@@ -61,9 +63,10 @@ function AttachmentContent({ message, onClose, onSave }) {
     if (image || playable) {
       (async () => {
         lease = message.vaultId ? await acquireVaultPreview(message, () => active)
-          : await acquireAttachmentFile(message.fileUri, mediaExtension(message.mimeType));
+          : image ? await acquireValidatedImage(message.fileUri, message.mimeType)
+            : await acquireAttachmentFile(message.fileUri, mediaExtension(message.mimeType));
         if (!active) { release(); return; }
-        if (image) await validateImageFile(lease.uri);
+        if (image && message.vaultId) await validateImageFile(lease.uri);
         if (!active) { release(); return; }
         setPreviewUri(lease.uri);
         if (image) setValidatedImageUri(lease.uri);
@@ -116,7 +119,8 @@ function AttachmentContent({ message, onClose, onSave }) {
         <Text style={s.title}>{page + 1}{pdf ? ` / ${pdf.pageCount}` : ''}</Text>
         <TouchableOpacity disabled={!pdf || page + 1 >= pdf.pageCount} style={s.button} onPress={() => setPage(page + 1)}><Text style={s.label}>Next</Text></TouchableOpacity>
       </View>
-    </View> : image ? (uri && validatedImageUri === uri ? <Image source={{ uri, cache: 'reload' }} resizeMode="contain" style={s.content} />
+    </View> : image ? (uri && validatedImageUri === uri ? <ZoomableImage uri={uri} style={s.content}
+        onError={() => { setValidatedImageUri(null); setPreviewError('This attachment cannot be previewed safely.'); }} />
       : <View style={s.content}><Text style={s.label}>{previewError || 'Checking image…'}</Text></View>)
       : playable ? <View style={s.content}>
         {uri ? <PrivateVideo uri={uri} style={s.content} playing={playing}

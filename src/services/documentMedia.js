@@ -31,6 +31,13 @@ export async function cleanVideo(uri, confirmOriginal, originalMime = null) {
   try { return await stageAttachment(output, 'mp4', true); }
   finally { await FileSystem.deleteAsync(output, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false)); }
 }
+// Resolves to a scratch 720p MP4 URI, or null when the build cannot convert or
+// the source is already standard size. Callers own and delete the output.
+export async function transcodeVideo(uri) {
+  if (!nativeAttachments?.transcodeVideo) return null;
+  await initializeAttachmentTools();
+  return (await nativeAttachments.transcodeVideo(uri)) || null;
+}
 export function hasNativeDocumentTools() { return Boolean(nativeAttachments); }
 export async function validateImageFile(uri) {
   if (!isOwnedAttachment(uri) || !nativeAttachments?.validateImageFile) throw new Error('Protected local image validation is unavailable');

@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator } from 'react-native';
 import Icon from './Icon';
-import PrivateVideo from './PrivateVideo';
-import { acquireAttachmentFile, mediaExtension } from '../services/attachmentFiles';
-import { validateImageFile } from '../services/documentMedia';
+import VoiceNote from './VoiceNote';
+import { acquireValidatedImage } from '../services/imagePreviewCache';
 import { recordCleanup } from '../services/cleanupStatus';
 import { sp, radius } from '../theme';
 import { useTheme } from '../hooks/useTheme';
@@ -26,29 +25,29 @@ const fmtTime = (ts) => {
   return `${h}:${m} ${ampm}`;
 };
 
-
+// Images only. Video players are opened in AttachmentViewer so the chat list
+// does not keep one decoder per bubble in memory.
 function InlinePreview({ message, active }) {
   const [uri, setUri] = useState(null), [failed, setFailed] = useState(false);
+  const isVideo = message.type === 'video';
   useEffect(() => {
     let alive = true, lease;
     setUri(null); setFailed(false);
     const release = () => { try { lease?.release(); } catch { recordCleanup('scratch-delete', false); } };
-    if (active && message.fileUri) {
+    if (active && message.fileUri && !isVideo) {
       (async () => {
-        lease = await acquireAttachmentFile(message.fileUri, mediaExtension(message.mimeType));
+        lease = await acquireValidatedImage(message.fileUri, message.mimeType);
         if (!alive) { release(); return; }
-        if (message.type === 'image') await validateImageFile(lease.uri);
-        if (alive) setUri(lease.uri);
+        setUri(lease.uri);
       })().catch(() => { release(); if (alive) setFailed(true); });
     }
     return () => { alive = false; release(); };
-  }, [active, message.fileUri, message.mimeType, message.type]);
+  }, [active, message.fileUri, message.mimeType, isVideo]);
   return <View style={{ width: 240, height: 200, backgroundColor: '#171c24', alignItems: 'center', justifyContent: 'center' }}>
-    {uri ? message.type === 'image'
+    {uri && !isVideo
       ? <Image source={{ uri }} resizeMode="cover" style={StyleSheet.absoluteFill} onError={() => setFailed(true)} />
-      : <View pointerEvents="none" style={StyleSheet.absoluteFill}><PrivateVideo uri={uri} playing={false} style={{ flex: 1 }} /></View>
-      : <Icon name={message.type === 'image' ? 'image-outline' : 'videocam-outline'} color="#fff" size={36} />}
-    {message.type === 'video' && uri && <View style={{ backgroundColor: '#0009', borderRadius: 30, padding: 12 }}><Icon name="play" color="#fff" size={28} /></View>}
+      : <Icon name={isVideo ? 'videocam-outline' : 'image-outline'} color="#fff" size={36} />}
+    {isVideo && <View style={{ backgroundColor: '#0009', borderRadius: 30, padding: 12 }}><Icon name="play" color="#fff" size={28} /></View>}
     {(failed || !message.fileUri) && <Text style={{ color: '#fff', padding: 12 }}>{failed ? 'Preview unavailable' : 'Saved privately. Tap to open'}</Text>}
   </View>;
 }
@@ -65,6 +64,7 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
   if (!message || !message.type) return null;
 
   const isMedia = message.type === 'image' || message.type === 'video';
+  const isVoice = message.type === 'file' && /^audio\//.test(message.mimeType || '') && Boolean(message.fileUri);
   const isSystem = message.type === 'system';
   const time = fmtTime(message.ts);
 
@@ -74,6 +74,12 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
   const content = () => {
     if (['image', 'video'].includes(message.type)) {
       return <InlinePreview message={message} active={mediaActive} />;
+    }
+    if (isVoice) {
+      return <VoiceNote message={message} active={mediaActive}
+        tint={isSent ? 'rgba(255,255,255,0.22)' : colors.accentTint}
+        textColor={isSent ? colors.bubbleSentText : colors.accent}
+        mutedColor={isSent ? 'rgba(255,255,255,0.6)' : colors.textTertiary} />;
     }
     switch (message.type) {
       case 'file':
@@ -122,9 +128,15 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
 
   // Footer (timestamp + ticks) shown inside the bubble's bottom corner for
   // text/file; under media for legibility on photos/video.
+  const metaColor = isSent ? 'rgba(255,255,255,0.78)' : colors.textTertiary;
+  const hdLabel = message.hd || message.hdStage === 'done' ? 'HD'
+    : message.hdStage === 'waiting' ? 'HD queued'
+      : message.hdStage === 'sending' ? `HD ${Math.round((message.hdProgress || 0) * 100)}%` : null;
   const meta = (
     <View style={[s.meta, isMedia && s.metaMedia]}>
-      <Text style={[typography.micro, { color: isSent ? 'rgba(255,255,255,0.78)' : colors.textTertiary }]}>
+      {isMedia && hdLabel && <Text accessibilityLabel={hdLabel === 'HD' ? 'High quality' : `High quality version: ${hdLabel.slice(3)}`}
+        style={[typography.micro, { color: metaColor, fontWeight: '700', marginRight: 6 }]}>{hdLabel}</Text>}
+      <Text style={[typography.micro, { color: metaColor }]}>
         {time}
       </Text>
       {isSent && (
@@ -158,7 +170,7 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
           isMedia && s.media,
         ]}
       >
-        {['image', 'video', 'file'].includes(message.type) && onOpen ?
+        {['image', 'video', 'file'].includes(message.type) && onOpen && !isVoice ?
           <TouchableOpacity disabled={!mediaActive} accessibilityLabel="Open attachment" onPress={() => {
             onOpen(message);
           }}>{body}</TouchableOpacity> : body}

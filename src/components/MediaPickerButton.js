@@ -4,7 +4,7 @@ import React, { useState, useRef } from 'react';
 import { View, TouchableOpacity, Text, StyleSheet, Modal, Pressable, Alert, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { deleteAttachment } from '../services/attachmentFiles';
-import { prepareAttachment } from '../services/prepareAttachment';
+import { prepareAttachment, prepareStandardCopy } from '../services/prepareAttachment';
 import { cleanAbandonedCaptures } from '../services/cameraCache';
 import * as DocumentPicker from 'expo-document-picker';
 import { Camera } from 'expo-camera';
@@ -34,11 +34,41 @@ function confirmPrivacyWarning(title, message) {
   });
 }
 
-export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onPreparingChange, onOpenCamera, onOpenVault, disabled = false }) {
+export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onPreparingChange, onOpenCamera, onOpenVault, hd = true, disabled = false }) {
   const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const updateProcessing = (value) => { setIsProcessing(value); onPreparingChange?.(value); };
+  const hdRef = useRef(hd);
+  hdRef.current = hd;
+
+  // Deliver a quick standard copy first. With HD on, the full-quality original
+  // follows as a promise that always settles (to null when unavailable).
+  const prepareVisual = async (asset, type, epoch) => {
+    const isActive = () => isChatEpochActive(epoch);
+    const source = { ...asset, mimeType: asset.mimeType || (type === 'video' ? 'video/mp4' : 'image/jpeg') };
+    const deliver = type === 'video' ? onVideoSelected : onImageSelected;
+    const normalize = (prepared) => ({ ...prepared, mimeType: type === 'video' ? prepared.mimeType || 'video/mp4' : 'image/jpeg' });
+    const standard = await prepareStandardCopy(source, isActive).catch((error) => { if (!isActive()) throw error; return null; });
+    if (!standard) {
+      const prepared = await prepareAttachment(source, isActive, confirmPrivacyWarning);
+      if (!prepared) return;
+      if (isActive()) deliver(normalize(prepared));
+      else deleteAttachment(prepared.fileUri);
+      return;
+    }
+    if (!isActive()) { deleteAttachment(standard.fileUri); return; }
+    if (!hdRef.current) { deliver(normalize(standard)); return; }
+    let settleUpgrade;
+    deliver(normalize(standard), new Promise((resolve) => { settleUpgrade = resolve; }));
+    let full = null;
+    try {
+      updateProcessing(false);
+      full = await prepareAttachment(source, isActive, async () => false);
+      if (full && !isActive()) { deleteAttachment(full.fileUri); full = null; }
+    } catch { full = null; }
+    finally { settleUpgrade(full && normalize(full)); }
+  };
   const [isPicking, setIsPicking] = useState(false);
   const pickingRef = useRef(false);
   const pendingPick = useRef(null);
@@ -70,17 +100,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
         rememberCopy(asset.uri);
         if (!isChatEpochActive(epoch)) return;
         updateProcessing(true);
-        if (asset.type === 'video') {
-          const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'video/mp4' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
-          if (!prepared) return;
-          if (isChatEpochActive(epoch)) onVideoSelected({ ...prepared, mimeType: prepared.mimeType || 'video/mp4' });
-          else deleteAttachment(prepared.fileUri);
-        } else {
-          const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'image/jpeg' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
-          if (!prepared) return;
-          if (isChatEpochActive(epoch)) onImageSelected({ ...prepared, mimeType: 'image/jpeg' });
-          else deleteAttachment(prepared.fileUri);
-        }
+        await prepareVisual(asset, asset.type === 'video' ? 'video' : 'image', epoch);
       }
       else if (key === 'photo') {
         const p = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -96,11 +116,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
           rememberCopy(r.assets[0].uri);
           if (!isChatEpochActive(epoch)) return;
           updateProcessing(true);
-          const asset = r.assets[0];
-          const prepared = await prepareAttachment({ ...asset, mimeType: asset.mimeType || 'image/jpeg' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
-          if (!prepared) return;
-          if (isChatEpochActive(epoch)) onImageSelected({ ...prepared, mimeType: 'image/jpeg' });
-          else deleteAttachment(prepared.fileUri);
+          await prepareVisual(r.assets[0], 'image', epoch);
         }
       }
       else if (key === 'video') {
@@ -113,10 +129,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
           rememberCopy(a.uri);
           if (!isChatEpochActive(epoch)) return;
           updateProcessing(true);
-          const prepared = await prepareAttachment({ ...a, mimeType: a.mimeType || 'video/mp4' }, () => isChatEpochActive(epoch), confirmPrivacyWarning);
-          if (!prepared) return;
-          if (isChatEpochActive(epoch)) onVideoSelected({ ...prepared, mimeType: prepared.mimeType || 'video/mp4' });
-          else deleteAttachment(prepared.fileUri);
+          await prepareVisual(a, 'video', epoch);
         }
       }
       else if (key === 'file') {
@@ -196,9 +209,10 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
                     accessibilityLabel={o.label}
                   >
                     <View style={[s.optCircle, { backgroundColor: colors.accentTint, borderColor: colors.hairline }, isTablet && s.optCircleTablet]}>
-                      <Icon name={o.icon} size={isTablet ? 30 : 26} color={colors.accent} />
+                      <Icon name={o.icon} size={isTablet ? 26 : 22} color={colors.accent} />
                     </View>
-                    <Text style={[typography.caption, { color: colors.textSecondary }, isTablet && { fontSize: 14 }]}>
+                    <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}
+                      style={[typography.micro, { color: colors.textSecondary }, isTablet && { fontSize: 13 }]}>
                       {o.label}
                     </Text>
                   </TouchableOpacity>
@@ -261,32 +275,33 @@ const s = StyleSheet.create({
   },
   grid: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-evenly',
-    paddingHorizontal: sp.md,
+    flexWrap: 'nowrap',
+    justifyContent: 'space-between',
+    paddingHorizontal: sp.sm,
   },
   gridTablet: {
-    paddingHorizontal: sp.xl,
+    paddingHorizontal: sp.lg,
     paddingVertical: sp.sm,
   },
   optBtn: {
+    flex: 1,
     alignItems: 'center',
-    width: 72,
+    paddingHorizontal: 2,
   },
-  optBtnTablet: { width: 92 },
+  optBtnTablet: { maxWidth: 96 },
   optCircle: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: sp.sm,
+    marginBottom: 6,
     borderWidth: StyleSheet.hairlineWidth,
   },
   optCircleTablet: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
   },
   cancelBtn: {
     marginTop: sp.lg,

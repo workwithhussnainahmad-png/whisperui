@@ -19,7 +19,11 @@ export default function PrivateVideo({ uri, playing, style, onStopped }) {
     const status = player.addListener('statusChange', ({ error }) => {
       if (error) callback.current?.();
     });
-    return () => { ended.remove(); status.remove(); };
+    return () => {
+      ended.remove();
+      status.remove();
+      try { player.pause(); } catch { /* released */ }
+    };
   }, [player]);
   useEffect(() => {
     if (playing) player.play();

@@ -1,9 +1,9 @@
 {
   "expo": {
     "name": "Whisper",
-    "slug": "whsiperapp",
+    "slug": "whisper",
     "icon": "./assets/icon.png",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "ios": {
@@ -54,15 +54,21 @@
         {
           "photosPermission": "Allow access to select photos to share in chat.",
           "cameraPermission": "Allow access to camera to take photos for chat.",
-          "microphonePermission": "Allow Whisper to record audio when you record a video."
+          "microphonePermission": "Allow Whisper to record audio for voice messages and videos."
         }
       ],
       [
         "expo-camera",
         {
           "cameraPermission": "Allow camera access to scan a Whisper invite QR code.",
-          "microphonePermission": "Allow Whisper to record audio when you record a video.",
+          "microphonePermission": "Allow Whisper to record audio for voice messages and videos.",
           "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Whisper to record audio for voice messages and videos."
         }
       ],
       "expo-sharing",
@@ -72,10 +78,10 @@
     "extra": {
       "serverUrl": "https://mywhisperchat.duckdns.org",
       "eas": {
-        "projectId": "b5273018-113e-442c-aa2e-5699a1d7f842"
+        "projectId": "034c9b6f-c804-42e3-bc79-ced05105e270"
       }
     },
-    "owner": "accformes-team",
+    "owner": "hussnainahmadsahi",
     "scheme": "whisperchat"
   }
 }

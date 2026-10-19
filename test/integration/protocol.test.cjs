@@ -172,7 +172,7 @@ for (const mode of ['invite', 'random']) test(`real mobile clients establish ${m
       assert.equal(alice.api.canExchangeMedia(), true); assert.equal(bob.api.canExchangeMedia(), true);
     }
     const content = crypto.randomBytes(400000);
-    await alice.api.sendFile(content.toString('base64'), 'application/octet-stream', 'example.bin', content.length);
+    await alice.api.sendFile(content.toString('base64'), 'application/octet-stream', 'example.bin', content.length, crypto.randomUUID(), undefined, new AbortController().signal);
     assert.deepEqual(processingErrors, []);
     assert.equal(completed.length, 1);
     const receivedFile = bob.vault.get(completed[0].fileUri);
@@ -213,6 +213,12 @@ for (const mode of ['invite', 'random']) test(`real mobile clients establish ${m
     assert.equal(completed.length, 3);
     assert.deepEqual([...bob.files.keys()], bobCache);
     assert.deepEqual([...alice.savedFiles], diskBefore);
+    // Ordinary picked attachments use the same cancellable commit boundary.
+    const pickedCancel = new AbortController();
+    await assert.rejects(alice.api.sendFile(content.toString('base64'), 'application/octet-stream', 'cancel.bin', content.length,
+      crypto.randomUUID(), (progress, stage) => { if (stage === 'sending' && progress > 0) pickedCancel.abort(); }, pickedCancel.signal), /cancelled/);
+    assert.equal(completed.length, 3);
+    assert.deepEqual([...bob.files.keys()], bobCache);
     await alice.saved.configureVaultLock(true, 60);
     await assert.rejects(alice.api.sendVaultFile(savedA.id, crypto.randomUUID(), (progress, stage) => {
       if (stage === 'sending' && progress > 0) alice.saved.setVaultAppActive(false);

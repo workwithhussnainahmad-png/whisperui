@@ -331,7 +331,7 @@ export async function createInvite() {
     throw new Error(response?.error || 'Could not create invite');
   }
   const code = normalizeJoinCode(response.locator);
-  if (!isValidInviteCode(code)) throw new Error('Server returned an invalid invite locator');
+  if (!isValidInviteCode(code)) throw new Error('Server returned an incompatible invite code. Update and restart the Whisper backend to the Phase 4X version, and check the app server URL.');
   return code;
 }
 
@@ -605,7 +605,7 @@ async function sendMedia(type, data, mimeType, fileName, messageId = createMessa
   const size = source ? source.size : file ? file.size : base64ByteLength(data);
   validateAttachmentSize(size);
   const descriptor = { type, mimeType, fileName: fileName || 'Whisperchat', fileSize: size, allowSaving: allowSavingMyMedia,
-    ...(source ? { commitRequired: true } : {}) };
+    ...((source || options.signal) ? { commitRequired: true } : {}) };
   const count = Math.ceil(size / CHUNK_BYTES);
   if (!validateMessageBody({ type: 'media-chunk', messageId, transferId: messageId, descriptor,
     count, index: count - 1, data: 'YQ==' })) throw new Error('Attachment metadata is invalid');
@@ -636,7 +636,7 @@ async function sendMedia(type, data, mimeType, fileName, messageId = createMessa
   if (options.signal?.aborted) stop();
   try {
     check();
-    if (source) await acknowledgedSend('capability', { type: 'media-policy', allowSaving: allowSavingMyMedia,
+    if (source || options.signal) await acknowledgedSend('capability', { type: 'media-policy', allowSaving: allowSavingMyMedia,
       vaultTransferVersion: 1, capabilityId: messageId, capabilityReply: false }, 5000);
     sentMediaBudget += size;
     onProgress?.(0, 'sending');
@@ -658,13 +658,13 @@ async function sendMedia(type, data, mimeType, fileName, messageId = createMessa
           } else part = data.slice(index * CHUNK_CHARS, (index + 1) * CHUNK_CHARS);
           await acknowledgedSend(index, { type: 'media-chunk', transferId: messageId, descriptor, index, count, data: part });
           acknowledged += base64ByteLength(part);
-          onProgress?.(source ? Math.min(0.98, acknowledged / size) : acknowledged / size, 'sending');
+          onProgress?.((source || options.signal) ? Math.min(0.98, acknowledged / size) : acknowledged / size, 'sending');
         } catch (error) { failureCause ||= error; stop(); throw error; }
       }));
       const failure = results.find((result) => result.status === 'rejected');
       if (failure) throw failureCause || failure.reason;
     }
-    if (source) {
+    if (source || options.signal) {
       check(); committing = true; onProgress?.(0.99, 'finishing');
       await acknowledgedSend('complete', { type: 'media-complete', transferId: messageId });
     }
@@ -700,16 +700,16 @@ export async function sendVaultFile(id, messageId = createMessageId(), onProgres
   } finally { source.close(); }
 }
 
-export function sendImage(imageData, mimeType, messageId, onProgress) {
-  return sendMedia('image', imageData, mimeType, '', messageId, onProgress);
+export function sendImage(imageData, mimeType, messageId, onProgress, signal) {
+  return sendMedia('image', imageData, mimeType, '', messageId, onProgress, { signal });
 }
 
-export function sendVideo(videoData, mimeType, messageId, onProgress) {
-  return sendMedia('video', videoData, mimeType, '', messageId, onProgress);
+export function sendVideo(videoData, mimeType, messageId, onProgress, signal) {
+  return sendMedia('video', videoData, mimeType, '', messageId, onProgress, { signal });
 }
 
-export function sendFile(fileData, mimeType, fileName, fileSize, messageId, onProgress) {
-  return sendMedia('file', fileData, mimeType, fileName, messageId, onProgress);
+export function sendFile(fileData, mimeType, fileName, fileSize, messageId, onProgress, signal) {
+  return sendMedia('file', fileData, mimeType, fileName, messageId, onProgress, { signal });
 }
 
 export async function setMediaSavingAllowed(allowed) {

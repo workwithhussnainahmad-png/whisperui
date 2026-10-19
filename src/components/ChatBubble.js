@@ -1,6 +1,10 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Image, ActivityIndicator } from 'react-native';
 import Icon from './Icon';
+import PrivateVideo from './PrivateVideo';
+import { acquireAttachmentFile, mediaExtension } from '../services/attachmentFiles';
+import { validateImageFile } from '../services/documentMedia';
+import { recordCleanup } from '../services/cleanupStatus';
 import { sp, radius } from '../theme';
 import { useTheme } from '../hooks/useTheme';
 
@@ -23,6 +27,32 @@ const fmtTime = (ts) => {
 };
 
 
+function InlinePreview({ message, active }) {
+  const [uri, setUri] = useState(null), [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true, lease;
+    setUri(null); setFailed(false);
+    const release = () => { try { lease?.release(); } catch { recordCleanup('scratch-delete', false); } };
+    if (active && message.fileUri) {
+      (async () => {
+        lease = await acquireAttachmentFile(message.fileUri, mediaExtension(message.mimeType));
+        if (!alive) { release(); return; }
+        if (message.type === 'image') await validateImageFile(lease.uri);
+        if (alive) setUri(lease.uri);
+      })().catch(() => { release(); if (alive) setFailed(true); });
+    }
+    return () => { alive = false; release(); };
+  }, [active, message.fileUri, message.mimeType, message.type]);
+  return <View style={{ width: 240, height: 200, backgroundColor: '#171c24', alignItems: 'center', justifyContent: 'center' }}>
+    {uri ? message.type === 'image'
+      ? <Image source={{ uri }} resizeMode="cover" style={StyleSheet.absoluteFill} onError={() => setFailed(true)} />
+      : <View pointerEvents="none" style={StyleSheet.absoluteFill}><PrivateVideo uri={uri} playing={false} style={{ flex: 1 }} /></View>
+      : <Icon name={message.type === 'image' ? 'image-outline' : 'videocam-outline'} color="#fff" size={36} />}
+    {message.type === 'video' && uri && <View style={{ backgroundColor: '#0009', borderRadius: 30, padding: 12 }}><Icon name="play" color="#fff" size={28} /></View>}
+    {(failed || !message.fileUri) && <Text style={{ color: '#fff', padding: 12 }}>{failed ? 'Preview unavailable' : 'Saved privately. Tap to open'}</Text>}
+  </View>;
+}
+
 export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSend, mediaActive = true }) {
   const [saving, setSaving] = useState(false);
   const { colors, typography } = useTheme();
@@ -43,12 +73,7 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
 
   const content = () => {
     if (['image', 'video'].includes(message.type)) {
-      return <View style={{ padding: 16 }}>
-        <Text style={[typography.bodyStrong, { color: colors.text }]}>
-          {message.type === 'image' ? 'Image attachment' : 'Video attachment'}
-        </Text>
-        <Text style={[typography.caption, { color: colors.textSecondary }]}>Tap to preview · {fmtSize(message.fileSize)}</Text>
-      </View>;
+      return <InlinePreview message={message} active={mediaActive} />;
     }
     switch (message.type) {
       case 'file':
@@ -105,7 +130,7 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
       {isSent && (
         <Icon
           name={
-            message.delivery === 'failed'
+            ['failed', 'cancelled'].includes(message.delivery)
               ? 'alert-circle'
               : message.delivery === 'sending'
                 ? 'time-outline'
@@ -114,7 +139,7 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
                   : 'checkmark'
           }
           size={13}
-          color={message.delivery === 'failed' ? colors.warning : 'rgba(255,255,255,0.85)'}
+          color={['failed', 'cancelled'].includes(message.delivery) ? colors.warning : 'rgba(255,255,255,0.85)'}
           style={s.tick}
         />
       )}
@@ -138,14 +163,20 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
             onOpen(message);
           }}>{body}</TouchableOpacity> : body}
         {isSent && ['image', 'video', 'file'].includes(message.type) && message.delivery === 'sending' && (
-          <View accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: 100, now: Math.round((message.progress || 0) * 100) }}>
-            <View style={{ height: 4, backgroundColor: colors.surface3, marginTop: 8 }}>
-              <View style={{ height: 4, width: `${Math.round((message.progress || 0) * 100)}%`, backgroundColor: colors.accent }} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', padding: 10, gap: 12, backgroundColor: '#0009', borderRadius: 16,
+            ...(isMedia ? { position: 'absolute', top: 70, alignSelf: 'center' } : {}) }}>
+            <View style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }} accessibilityRole="progressbar"
+              accessibilityValue={{ min: 0, max: 100, now: Math.round((message.progress || 0) * 100) }}>
+              {['checking', 'finishing'].includes(message.sendStage) ? <ActivityIndicator size="large" color="#fff" style={StyleSheet.absoluteFill} />
+                : Array.from({ length: 32 }, (_, i) => <View key={i} style={{ position: 'absolute', width: 4, height: 4, borderRadius: 2,
+                  left: 22 + 21 * Math.sin(i * Math.PI / 16), top: 22 - 21 * Math.cos(i * Math.PI / 16),
+                  backgroundColor: i / 32 < (message.progress || 0) ? '#fff' : '#ffffff40' }} />)}
+              {message.sendStage !== 'finishing' && onCancelSend && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel file send"
+                style={{ width: 48, height: 48, alignItems: 'center', justifyContent: 'center' }} onPress={() => onCancelSend(message.id)}>
+                <Icon name="close" color="#fff" size={24} />
+              </TouchableOpacity>}
             </View>
-            <Text style={[typography.caption, { color: colors.text }]}>{message.sendStage === 'checking' ? 'Checking saved file…' : message.sendStage === 'finishing' ? 'Finishing send…' : `${Math.round((message.progress || 0) * 100)}% received by peer`}</Text>
-            {message.vaultId && ['checking', 'sending'].includes(message.sendStage) && onCancelSend && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel file send" style={{ padding: 12 }} onPress={() => onCancelSend(message.id)}>
-              <Text style={{ color: colors.accent }}>Cancel send</Text>
-            </TouchableOpacity>}
+            <Text style={{ color: '#fff', fontWeight: '600' }}>{message.sendStage === 'checking' ? 'Checking...' : message.sendStage === 'finishing' ? 'Finishing...' : `${Math.round((message.progress || 0) * 100)}%`}</Text>
           </View>
         )}
         {!isSent && message.allowSaving === true && ['image', 'video', 'file'].includes(message.type) && onSave && (
@@ -154,6 +185,7 @@ export default function ChatBubble({ message, isSent, onSave, onOpen, onCancelSe
             <Icon name={saving ? 'hourglass-outline' : 'download-outline'} size={24} color={colors.accent} />
           </TouchableOpacity>
         )}
+        {message.delivery === 'cancelled' && <Text style={{ color: colors.textSecondary, padding: 8 }}>Cancelled</Text>}
         {meta}
       </View>
     </View>

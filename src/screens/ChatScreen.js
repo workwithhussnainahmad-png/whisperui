@@ -599,9 +599,9 @@ export default function ChatScreen({ navigation, route }) {
     }
   };
 
-  const updateProgress = (messageId) => (progress) => {
+  const updateProgress = (messageId) => (progress, sendStage) => {
     if (!inChatRef.current || endedRef.current) return;
-    setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress } : message));
+    setMessages((previous) => previous.map((message) => message.id === messageId ? { ...message, progress, sendStage } : message));
   };
 
   const sendSavedFile = async (item) => {
@@ -629,52 +629,25 @@ export default function ChatScreen({ navigation, route }) {
     } finally { vaultSends.current.delete(messageId); }
   };
 
-  const doImg = async (payload) => {
+  const sendPicked = async (type, payload) => {
     if (!canSendMessages() || endedRef.current || !protectionReadyRef.current) return;
-    const messageId = createMessageId();
-    setMessages((p) => appendBoundedMessage(p, {
-      id: messageId, type: 'image', ...payload, isSent: true, ts: Date.now(), delivery: 'sending',
-    }));
+    const messageId = createMessageId(), controller = new AbortController();
+    vaultSends.current.set(messageId, controller);
+    setMessages(p => appendBoundedMessage(p, { id: messageId, type, ...payload,
+      isSent: true, ts: Date.now(), delivery: 'sending', sendStage: 'sending', progress: 0 }));
     try {
-      await sendImage(payload.fileUri ? payload : payload.imageData, payload.mimeType, messageId, updateProgress(messageId));
-      updateDelivery(messageId, 'relayed');
-    } catch {
-      updateDelivery(messageId, 'failed');
-      Alert.alert('Send failed', 'This image could not be relayed safely.');
-    }
+      const data = payload.fileUri ? payload : payload[`${type}Data`];
+      if (type === 'file') await sendFile(data, payload.mimeType, payload.fileName, payload.fileSize, messageId, updateProgress(messageId), controller.signal);
+      else await (type === 'image' ? sendImage : sendVideo)(data, payload.mimeType, messageId, updateProgress(messageId), controller.signal);
+      updateDelivery(messageId, 'delivered');
+    } catch (error) {
+      updateDelivery(messageId, controller.signal.aborted ? 'cancelled' : 'failed');
+      if (!controller.signal.aborted && inChatRef.current) Alert.alert('Send failed', error.message || 'Please try again.');
+    } finally { vaultSends.current.delete(messageId); }
   };
-
-  const doVid = async (payload) => {
-    if (!canSendMessages() || endedRef.current || !protectionReadyRef.current) return;
-    const messageId = createMessageId();
-    setMessages((p) => appendBoundedMessage(p, {
-      id: messageId, type: 'video', ...payload, isSent: true, ts: Date.now(), delivery: 'sending',
-    }));
-    try {
-      await sendVideo(payload.fileUri ? payload : payload.videoData, payload.mimeType, messageId, updateProgress(messageId));
-      updateDelivery(messageId, 'relayed');
-    } catch {
-      updateDelivery(messageId, 'failed');
-      Alert.alert('Send failed', 'This video could not be relayed safely.');
-    }
-  };
-
-  const doFile = async (payload) => {
-    if (!canSendMessages() || endedRef.current || !protectionReadyRef.current) return;
-    const messageId = createMessageId();
-    setMessages((p) => appendBoundedMessage(p, {
-      id: messageId, type: 'file', ...payload, isSent: true, ts: Date.now(), delivery: 'sending',
-    }));
-    try {
-      await sendFile(
-        payload.fileUri ? payload : payload.fileData, payload.mimeType, payload.fileName, payload.fileSize, messageId, updateProgress(messageId)
-      );
-      updateDelivery(messageId, 'relayed');
-    } catch {
-      updateDelivery(messageId, 'failed');
-      Alert.alert('Send failed', 'This file could not be relayed safely.');
-    }
-  };
+  const doImg = payload => sendPicked('image', payload);
+  const doVid = payload => sendPicked('video', payload);
+  const doFile = payload => sendPicked('file', payload);
 
   const confirmLeave = () => Alert.alert('Leave chat?', 'This clears the conversation from this app. Files saved privately in Whisper remain in Saved Files.', [
     { text: 'Stay', style: 'cancel' },
@@ -774,7 +747,7 @@ export default function ChatScreen({ navigation, route }) {
           </View>
 
           {chatMode === 'random' && <View style={[styles.savingRow, { flexWrap: 'wrap' }]}>
-            <Text style={[typography.caption, { color: colors.text, width: '100%' }]}>You are talking to a stranger. Images stay hidden until tapped.</Text>
+            <Text style={[typography.caption, { color: colors.text, width: '100%' }]}>You are talking to a stranger. Enable media only with someone you trust.</Text>
             <TouchableOpacity style={{ padding: sp.sm }} onPress={blockStranger}><Text style={{ color: colors.accent }}>Block / Skip</Text></TouchableOpacity>
             <TouchableOpacity disabled={chatLocked || hasMediaConsent()} style={{ padding: sp.sm }} onPress={async () => {
               try { await enableMedia(); setMediaConsentVersion(v => v + 1); } catch { Alert.alert('Cannot enable media', 'Please retry when connected.'); }
@@ -808,7 +781,7 @@ export default function ChatScreen({ navigation, route }) {
             ref={listRef}
             data={privacyOverlayVisible || !protectionReady ? [] : messages}
             renderItem={({ item }) => <ChatBubble message={item} isSent={item.isSent}
-              onSave={saveMedia} onOpen={setViewing} onCancelSend={(id) => vaultSends.current.get(id)?.abort()} mediaActive={!chatLocked && !viewing && inChatRef.current} />}
+              onSave={saveMedia} onOpen={setViewing} onCancelSend={(id) => vaultSends.current.get(id)?.abort()} mediaActive={!chatLocked && !privacyOverlayVisible && !cameraOpen && !viewing && inChatRef.current} />}
             keyExtractor={(i) => i.id}
             style={styles.list}
             contentContainerStyle={[styles.listContent, { paddingHorizontal: horizontalPadding }]}
@@ -819,7 +792,7 @@ export default function ChatScreen({ navigation, route }) {
             onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
           />
 
-          {messages.filter(message => message.vaultId && message.delivery === 'sending').map(message => (
+          {messages.filter(message => ['image', 'video', 'file'].includes(message.type) && message.delivery === 'sending').map(message => (
             <View key={`transfer-${message.id}`} style={[styles.savingRow, { borderBottomColor: colors.separator }]}>
               <Text style={[styles.flex, typography.caption, { color: colors.text }]}>
                 {message.sendStage === 'finishing' ? 'Finishing' : message.sendStage === 'checking' ? 'Checking saved file' : `Sending ${Math.round((message.progress || 0) * 100)}%`}

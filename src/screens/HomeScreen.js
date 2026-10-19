@@ -37,6 +37,8 @@ export default function HomeScreen({ navigation }) {
   const [showQr, setShowQr] = useState(false);
   const [isSharingQr, setIsSharingQr] = useState(false);
   const sharingQrRef = useRef(false);
+  const qrOptionAction = useRef(null);
+  const [showQrOptions, setShowQrOptions] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [isFindingRandom, setIsFindingRandom] = useState(false);
   const [isJoiningInvite, setIsJoiningInvite] = useState(false);
@@ -282,11 +284,7 @@ export default function HomeScreen({ navigation }) {
     finally { if (ownedUri) await FileSystem.deleteAsync(ownedUri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false)); }
   };
 
-  const handleOpenScanner = () => Alert.alert('Join with QR', 'Choose how to read the invite.', [
-    { text: 'Scan with camera', onPress: openCameraScanner },
-    { text: 'Choose from Photos', onPress: importQr },
-    { text: 'Cancel', style: 'cancel' },
-  ]);
+  const handleOpenScanner = () => { Keyboard.dismiss(); setShowQrOptions(true); };
 
   const openCameraScanner = async () => {
     let permission = cameraPermission;
@@ -534,6 +532,29 @@ export default function HomeScreen({ navigation }) {
       </KeyboardAvoidingView>
 
       {/* ── QR display modal ── */}
+      <Modal visible={showQrOptions} onDismiss={() => { const action = qrOptionAction.current; qrOptionAction.current = null; action?.(); }} transparent animationType="slide" onRequestClose={() => setShowQrOptions(false)}>
+        <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: colors.overlay }}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} accessibilityLabel="Close QR options" onPress={() => setShowQrOptions(false)} />
+          <SafeAreaView edges={['bottom']} style={{ backgroundColor: colors.surface1, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text style={[typography.title2, { color: colors.text }]}>Join with QR</Text>
+              <TouchableOpacity accessibilityLabel="Close QR options" style={{ padding: 12 }} onPress={() => setShowQrOptions(false)}><Icon name="close" /></TouchableOpacity>
+            </View>
+            <Text style={[typography.body, { color: colors.textSecondary, marginBottom: 20 }]}>Scan an invite or choose a QR image.</Text>
+            {[
+              ['scan-outline', 'Scan with camera', 'Point your camera at an invite', openCameraScanner],
+              ['images-outline', 'Choose from Photos', 'Use a QR image you already have', importQr],
+            ].map(([icon, title, subtitle, action]) => <TouchableOpacity key={title} accessibilityRole="button"
+              onPress={() => { if (Platform.OS === 'ios') qrOptionAction.current = action; setShowQrOptions(false); if (Platform.OS !== 'ios') action(); }}
+              style={{ flexDirection: 'row', alignItems: 'center', padding: 18, borderRadius: 18, backgroundColor: colors.surface2, marginBottom: 12, gap: 16 }}>
+              <Icon name={icon} size={28} color={colors.accent} /><View style={{ flex: 1 }}>
+                <Text style={[typography.bodyStrong, { color: colors.text }]}>{title}</Text>
+                <Text style={[typography.caption, { color: colors.textSecondary, marginTop: 4 }]}>{subtitle}</Text>
+              </View><Icon name="chevron-forward" size={20} />
+            </TouchableOpacity>)}
+          </SafeAreaView>
+        </View>
+      </Modal>
       <Modal visible={showQr && !!generatedCode} transparent animationType="fade" onRequestClose={() => setShowQr(false)}>
         <View style={[s.qrOverlay, { backgroundColor: colors.overlay }]}>
           <View style={[s.qrCard, { backgroundColor: colors.surface1, borderColor: colors.hairline, ...shadows.lg }, isTablet && s.qrCardTablet]}>

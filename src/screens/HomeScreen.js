@@ -344,11 +344,11 @@ export default function HomeScreen({ navigation }) {
 
             {/* ── Actions ── */}
             <View style={s.actions}>
-              {ALLOW_UNVERIFIED_CHATS && <Button
+              {<Button
                 variant="primary"
                 size="lg"
                 fullWidth
-                title={isFindingRandom ? 'Finding someone...' : '1-to-1 Random Chat'}
+                title={isFindingRandom ? 'Finding someone...' : 'Random Chat'}
                 icon="shuffle-outline"
                 subtitle="Encrypted - peer identity is not verified"
                 loading={isFindingRandom}
@@ -399,7 +399,7 @@ export default function HomeScreen({ navigation }) {
               </Pressable>}
 
               {!ALLOW_UNVERIFIED_CHATS && <Text style={[typography.caption, { color: colors.textSecondary }]}>
-                Private invites only. Compare safety codes before chatting.
+                Use a join code for a contact, or Random Chat to meet a stranger.
               </Text>}
 
               <View style={s.halfRow}>

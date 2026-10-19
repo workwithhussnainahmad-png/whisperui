@@ -104,20 +104,20 @@ function event(socket, name) {
   });
 }
 
-test('real mobile clients establish an invite chat through the backend and reject replay/tampering', async () => {
+for (const mode of ['invite', 'random']) test(`real mobile clients establish ${mode} chat and exchange authenticated messages and vault files`, async () => {
   const server = await startServer();
   const alice = client(server.url);
   const bob = client(server.url);
   try {
     const [a, b] = await Promise.all([alice.api.connectSocket(), bob.api.connectSocket()]);
-    await assert.rejects(alice.api.findRandom(), /disabled/);
-    const invite = await alice.api.createInvite();
-    assert.equal(alice.api.isValidInviteCode(invite), true);
+    const invite = mode === 'invite' ? await alice.api.createInvite() : null;
+    if (invite) assert.equal(alice.api.isValidInviteCode(invite), true);
     const matches = [event(a, 'matched'), event(b, 'matched')];
-    await bob.api.joinInvite(invite);
+    if (mode === 'invite') await bob.api.joinInvite(invite);
+    else { assert.equal((await alice.api.findRandom()).status, 'waiting'); await bob.api.findRandom(); }
     const [first, second] = await Promise.all(matches);
     assert.equal(first.roomId, second.roomId);
-    for (const peer of [alice, bob]) peer.api.configureChatSecurity({ roomId: first.roomId, chatMode: 'invite', inviteCode: invite });
+    for (const peer of [alice, bob]) peer.api.configureChatSecurity({ roomId: first.roomId, chatMode: mode, inviteCode: invite });
     await Promise.all([alice.api.ensureKeypair(), bob.api.ensureKeypair()]);
     const keys = [event(a, 'peer-key'), event(b, 'peer-key')];
     await Promise.all([alice.api.startKeyExchange(), bob.api.startKeyExchange()]);
@@ -161,6 +161,16 @@ test('real mobile clients establish an invite chat through the backend and rejec
     };
     a.on('receive-encrypted', processPacket(alice));
     b.on('receive-encrypted', processPacket(bob));
+    if (mode === 'random') {
+      await assert.rejects(alice.api.sendFile('YQ==', 'text/plain', 'a.txt', 1), /enable media/);
+      await assert.rejects(alice.api.sendVaultFile('missing'), /enable media/);
+      await alice.api.enableMedia();
+      await assert.rejects(alice.api.sendFile('YQ==', 'text/plain', 'a.txt', 1), /enable media/);
+      await bob.api.enableMedia();
+      const deadline = Date.now() + 3000;
+      while ((!alice.api.canExchangeMedia() || !bob.api.canExchangeMedia()) && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+      assert.equal(alice.api.canExchangeMedia(), true); assert.equal(bob.api.canExchangeMedia(), true);
+    }
     const content = crypto.randomBytes(400000);
     await alice.api.sendFile(content.toString('base64'), 'application/octet-stream', 'example.bin', content.length);
     assert.deepEqual(processingErrors, []);

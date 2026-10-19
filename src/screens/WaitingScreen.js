@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Animated, StyleSheet, Easing } from 'react-native';
+import { View, Text, Animated, StyleSheet, Easing, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import StatusBar from '../components/StatusBar';
 import Button from '../components/Button';
@@ -55,6 +55,8 @@ export default function WaitingScreen({ navigation }) {
         navigation.replace('Home');
       }
     };
+    const onTimeout = () => { Alert.alert('No match found', 'Search timed out. Please try again.'); navigation.replace('Home'); };
+    socket.on('search-timeout', onTimeout);
     socket.on('matched', onMatched);
     socket.on('error', onErr);
     socket.on('disconnect', onDisconnect);
@@ -64,6 +66,7 @@ export default function WaitingScreen({ navigation }) {
     return () => {
       anim.stop();
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      socket.off('search-timeout', onTimeout);
       socket.off('matched', onMatched);
       socket.off('error', onErr);
       socket.off('disconnect', onDisconnect);

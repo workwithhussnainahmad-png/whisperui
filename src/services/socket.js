@@ -52,6 +52,9 @@ const receivedSequences = new Set();
 let sessionEpoch = 0;
 let activeRoomId = null;
 let allowSavingMyMedia = false;
+let randomChat = false, localMediaConsent = false, peerMediaConsent = false;
+export const canExchangeMedia = () => !randomChat || (localMediaConsent && peerMediaConsent);
+export const hasMediaConsent = () => localMediaConsent;
 let queuedCharacters = 0;
 let queuedMessages = 0;
 let pendingInviteRequest = null;
@@ -67,11 +70,12 @@ export function isChatEpochActive(epoch) {
 
 export function configureChatSecurity({ inviteCode, chatMode, roomId } = {}) {
   resetE2E();
-  if (chatMode !== 'invite' || !isValidInviteCode(inviteCode)) {
+  if (chatMode !== 'random' && (chatMode !== 'invite' || !isValidInviteCode(inviteCode))) {
     throw new Error('A valid private invite is required');
   }
   if (socket?.data) socket.data.pendingMatch = null;
   activeRoomId = typeof roomId === 'string' ? roomId : null;
+  randomChat = chatMode === 'random';
   setInviteBinding(null); // Short code is only a lookup ID; compare safety codes to authenticate the peer.
   setRoomBinding(roomId);
   chatVerified = false;
@@ -231,7 +235,6 @@ export function disconnectSocket() {
 }
 
 export async function findRandom() {
-  if (!ALLOW_UNVERIFIED_CHATS) throw new Error('Use a private invite. Random chat is disabled.');
   await ensureCaptureProtection();
   if (!socket?.connected) throw new Error('Not connected');
   const response = await emitWithAck('find-random', {}, 7000);
@@ -411,7 +414,7 @@ export function resetE2E() {
   receivedSequences.clear();
   sessionEpoch += 1;
   activeRoomId = null;
-  allowSavingMyMedia = false;
+  allowSavingMyMedia = false; randomChat = false; localMediaConsent = false; peerMediaConsent = false;
   for (const cancel of [...pendingRequests]) cancel();
   queuedCharacters = 0;
   queuedMessages = 0;
@@ -449,6 +452,7 @@ function validateMessageBody(body) {
   if (body.type === 'media-transfer-error') return MESSAGE_ID_RE.test(body.transferId || '');
   if (body.type === 'media-policy') return typeof body.allowSaving === 'boolean' &&
     (body.capabilityId === undefined || (MESSAGE_ID_RE.test(body.capabilityId) && body.vaultTransferVersion === 1 && typeof body.capabilityReply === 'boolean'));
+  if (body.type === 'media-consent') return body.allowed === true;
   if (body.type === 'typing') return typeof body.active === 'boolean';
   if (body.type === 'security-notice') return ['screenshot', 'recording', 'overlay'].includes(body.event);
   if (body.type === 'session-close') return body.reason === 'left';
@@ -482,6 +486,8 @@ export async function decryptIncoming(encrypted, expectedMessageId) {
   for (const sequence of receivedSequences) {
     if (sequence <= receiveSequence - 256) receivedSequences.delete(sequence);
   }
+  if (envelope.body.type === 'media-consent') peerMediaConsent = true;
+  if (envelope.body.type === 'media-chunk' && !canExchangeMedia()) throw new Error('Both people must enable media first');
   if (envelope.body.type === 'media-policy' && envelope.body.capabilityId) {
     const control = envelope.body;
     if (control.capabilityReply) chunkWaiters.get(`${control.capabilityId}:capability`)?.resolve();
@@ -590,6 +596,7 @@ export function sendMessage(text, messageId) {
 }
 
 async function sendMedia(type, data, mimeType, fileName, messageId = createMessageId(), onProgress, options = {}) {
+  if (!canExchangeMedia()) throw new Error('Both people must enable media first');
   if (!canSendMessages()) throw new Error('The chat or recipient is no longer available.');
   if (activeMediaSends.size >= 2) throw new Error('Two attachments are already sending');
   const epoch = sessionEpoch, source = options.source;
@@ -679,6 +686,7 @@ async function sendMedia(type, data, mimeType, fileName, messageId = createMessa
 }
 
 export async function sendVaultFile(id, messageId = createMessageId(), onProgress, signal) {
+  if (!canExchangeMedia()) throw new Error('Both people must enable media first');
   const epoch = sessionEpoch;
   const active = () => !signal?.aborted && canSendMessages() && isChatEpochActive(epoch);
   if (!active()) throw new Error('The chat or recipient is no longer available.');
@@ -730,8 +738,21 @@ export function sendTyping(active) {
   }
 }
 
-export function reportUser() {
-  if (socket?.connected) socket.emit('report');
+export async function reportUser(category) {
+  if (!['spam', 'abuse', 'other'].includes(category)) throw new Error('Choose a report category');
+  const result = await emitWithAck('report', { category });
+  if (!result?.ok) throw new Error('Report could not be submitted');
+}
+export async function blockPeer() {
+  const result = await emitWithAck('block-peer', {}, 5000);
+  if (!result?.ok) throw new Error(result?.error || 'Could not block peer');
+}
+export async function enableMedia() {
+  if (!canSendMessages()) throw new Error('Chat is not ready');
+  const epoch = sessionEpoch;
+  await sendEncrypted({ type: 'media-consent', allowed: true });
+  if (!isChatEpochActive(epoch)) throw new Error('Chat ended');
+  localMediaConsent = true;
 }
 
 export function leaveRoom() {

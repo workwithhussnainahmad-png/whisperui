@@ -1,5 +1,5 @@
 # Privacy Policy
-Last updated: October 18, 2026
+Last updated: October 19, 2026
 
 Whisper ("we", "our", or "us") respects your privacy and is committed to protecting it. This Privacy Policy explains how Whisper handles information when you use our mobile application (the "App") and related chat relay service.
 
@@ -34,20 +34,24 @@ When you connect to the chat service, the server may temporarily assign an anony
 
 - Matchmaking / waiting-queue status
 - Active chat room pairing
-- Invite routing locators (not the full invite secret)
+- Six-character single-use join lookup IDs (ten minutes by default)
 - Connection and rate-limit counters (for abuse prevention)
 
 This data is ephemeral. It is not used to build user profiles, and it is not retained as chat history after the session ends.
 
 ### Messages and Media
 
-Private invite chats encrypt messages and attachments on your device before relay. Protocol 7 requires a secret invite and an installed build with the native libsignal integration. Share the full invite only through a trusted channel: possession of it does not independently prove a person's identity. The implementation uses libsignal for key agreement and ratcheting encryption. Whisper's integration and invite authentication have not received an independent cryptographic audit.
+Code-based and random one-to-one chats encrypt messages and attachments with native libsignal. Join codes only locate a waiting peer and are not encryption/authentication secrets. Compare the safety code by a trusted call or in person to verify a contact. Random peers are unverified: a malicious relay could misdirect pairing or substitute peer identities unless you compare fingerprints through a trusted channel. Public group chat is disabled.
 
-The protocol 7 app disables random chat and public groups. The backend retains optional legacy group functionality; if an operator enables it for other clients, those public group messages are readable by the server and are not end-to-end encrypted.
+Random chat is anonymous and uses no account. Files and Saved Files sending start disabled until both participants opt in for that chat. Received images remain hidden until tapped. Saving requires sender permission. Ending a chat clears session keys and chat-cache media; saved vault files remain until you delete/reset them.
+
+Waiting entries expire after two minutes, or are removed on cancellation/match/disconnect. Room pairing and relayed public-key state are removed on chat end. Anonymous connection/session state lasts until disconnect or the existing 30-minute session limit. Rate-limit buckets last their configured windows (normally one to five minutes) and are swept every minute. Block/Skip and Report retain only a pair of process-secret HMAC network-source labels for 30 minutes, swept within another minute; no raw IP is stored in these application records. This can affect other people on the same public IP/IPv6 prefix and can be evaded by changing network. These labels and blocks disappear on server restart. They are not persistent device identifiers.
+
+Reports send only the category you select (spam, abuse, or other); no transcript, media or filename is included. The relay ends the chat and temporarily blocks the source pair. Category totals may appear in aggregate security logs; there is no content-review inbox. Hosting log retention is controlled separately by the operator.
 
 The app connects directly over HTTPS. The server and its hosting/network providers can observe the connection IP address, timing, and traffic volume. Whisper does not currently route connections through Tor.
 
-Text conversations and messaging keys are held in memory. Completed chat attachment caches use temporary per-file encryption keys and are cleared with the chat. Files you explicitly save remain encrypted in Whisper's private vault after the chat ends or the app restarts. Vault keys use Android Keystore or non-synchronizing, device-only iOS Keychain protection. The vault is excluded from backups; losing its master key makes saved files inaccessible. You can view or delete files in Saved Files, or erase the entire vault and key with Reset Whisper.
+Text conversations and messaging keys are held in memory. Completed chat attachment caches use temporary per-file encryption keys and are cleared with the chat. Files you explicitly save remain encrypted in Whisper's private vault after the chat ends or the app restarts. Vault keys use Android Keystore or non-synchronizing, device-only iOS Keychain protection. The vault is excluded from backups; losing its master key makes saved files inaccessible. You can view or delete files in Saved Files, or erase the entire vault and key with Reset Whisper. Disabling Lock Saved Files authenticates first and requires typing DELETE, then permanently erases all saved files and keys.
 
 Attachment saving no longer exports to Files, Gallery, Downloads, Photos or other apps. Invite QR sharing remains an explicit external share action. Media preparation and opened previews can still require private temporary plaintext files; cleanup runs on close, chat teardown and startup, but is not a forensic-erasure guarantee. Previously exported external copies are not removed by this update.
 

@@ -7,7 +7,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import {
-  getSocket, sendMessage, sendImage, sendVideo, sendFile, sendVaultFile, leaveRoom, reportUser,
+  blockPeer, enableMedia, canExchangeMedia, hasMediaConsent, getSocket, sendMessage, sendImage, sendVideo, sendFile, sendVaultFile, leaveRoom, reportUser,
   startKeyExchange, isE2EReady, ensureKeypair, resetE2E, configureChatSecurity,
   confirmSecureChannel, canSendMessages, decryptIncoming, sendTyping,
   createMessageId, sendReceipt, setMediaSavingAllowed, sendSecurityNotice,
@@ -103,6 +103,7 @@ export default function ChatScreen({ navigation, route }) {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [vaultPickerOpen, setVaultPickerOpen] = useState(false);
   const vaultSends = useRef(new Map());
+  const [mediaConsentVersion, setMediaConsentVersion] = useState(0);
   useEffect(() => () => { for (const controller of vaultSends.current.values()) controller.abort(); vaultSends.current.clear(); }, []);
   const cameraResolver = useRef(null);
   const closeCamera = (asset = null) => {
@@ -141,6 +142,7 @@ export default function ChatScreen({ navigation, route }) {
       const msg = await decryptIncoming(payload?.encrypted, payload?.messageId);
       if (!inChatRef.current || endedRef.current || !isChatEpochActive(epoch)) return;
       if (!msg) return; // More encrypted attachment chunks are still arriving.
+      if (msg.type === 'media-consent') { setMediaConsentVersion(v => v + 1); return; }
       if (msg.type === 'heartbeat') { sendHeartbeat(msg.challenge, true).catch(() => {}); return; }
       if (msg.type === 'heartbeat-response') { livenessRef.current?.accept(msg.challenge); return; }
       if (msg.type === 'session-close') { finishChat('peer_left'); return; }
@@ -686,17 +688,14 @@ export default function ChatScreen({ navigation, route }) {
     },
   ]);
 
-  const confirmReport = () => Alert.alert('Report', 'This ends the chat for both users.', [
+  const confirmReport = () => Alert.alert('Report stranger', 'Choose a category. Only this category is sent; no messages, files or names are included. This blocks the source temporarily and ends the chat.', [
     { text: 'Cancel', style: 'cancel' },
-    {
-      text: 'Report',
-      style: 'destructive',
-      onPress: () => {
-        reportUser();
-        finishChat('reported');
-      },
-    },
+    ...['spam', 'abuse', 'other'].map(category => ({ text: category, onPress: async () => { try { await reportUser(category); finishChat('reported'); } catch { if (!endedRef.current) Alert.alert('Report not sent', 'Please retry.'); } } })),
   ]);
+  const blockStranger = async () => {
+    try { await blockPeer(); finishChat('blocked'); }
+    catch { Alert.alert('Could not block', 'Please retry or leave the chat.'); }
+  };
 
   const inputPlaceholder = securing
     ? 'Securing…'
@@ -758,7 +757,7 @@ export default function ChatScreen({ navigation, route }) {
                 ]}>
                   {chatMode === 'invite'
                     ? `Safety code compared - ${safetyCode}`
-                    : 'Encrypted - peer unverified'}
+                    : `Peer unverified - safety code: ${safetyCode}`}
                 </Text>
               )}
             </View>
@@ -774,6 +773,13 @@ export default function ChatScreen({ navigation, route }) {
             </View>
           </View>
 
+          {chatMode === 'random' && <View style={[styles.savingRow, { flexWrap: 'wrap' }]}>
+            <Text style={[typography.caption, { color: colors.text, width: '100%' }]}>You are talking to a stranger. Images stay hidden until tapped.</Text>
+            <TouchableOpacity style={{ padding: sp.sm }} onPress={blockStranger}><Text style={{ color: colors.accent }}>Block / Skip</Text></TouchableOpacity>
+            <TouchableOpacity disabled={chatLocked || hasMediaConsent()} style={{ padding: sp.sm }} onPress={async () => {
+              try { await enableMedia(); setMediaConsentVersion(v => v + 1); } catch { Alert.alert('Cannot enable media', 'Please retry when connected.'); }
+            }}><Text style={{ color: colors.accent }}>{canExchangeMedia() ? 'Media enabled' : hasMediaConsent() ? 'Waiting for peer media consent' : 'Enable media this chat'}</Text></TouchableOpacity>
+          </View>}
           {isExpoGoFeatureTest && <View accessibilityRole="alert" style={[styles.notice, { backgroundColor: colors.warningTint }]}>
             <Text style={[typography.caption, { color: colors.text }]}>Expo Go feature test</Text>
             <Text style={[typography.micro, { color: colors.textSecondary }]}>Encryption and chat features are active. Native recording detection, privacy covers and metadata tools require an installed build. Use test content.</Text>
@@ -847,7 +853,7 @@ export default function ChatScreen({ navigation, route }) {
               onImageSelected={doImg}
               onVideoSelected={doVid}
               onFileSelected={doFile}
-              disabled={chatLocked}
+              disabled={chatLocked || !canExchangeMedia()}
             />
             <TextInput
               style={[

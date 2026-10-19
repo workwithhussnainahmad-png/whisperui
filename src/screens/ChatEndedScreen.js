@@ -8,7 +8,7 @@ import { sp, radius } from '../theme';
 import { useTheme } from '../hooks/useTheme';
 import ScreenContainer from '../components/ScreenContainer';
 import { useResponsiveLayout } from '../hooks/useResponsiveLayout';
-import { connectSocket, getSocket, resetE2E } from '../services/socket';
+import { connectSocket, getSocket, resetE2E, findRandom } from '../services/socket';
 
 export default function ChatEndedScreen({ navigation, route }) {
   const { colors, typography } = useTheme();
@@ -21,6 +21,7 @@ export default function ChatEndedScreen({ navigation, route }) {
     peer_left: 'The other person left.',
     session_expired: 'The session reached its privacy time limit.',
     reported: 'Chat ended due to a report.',
+    blocked: 'Peer blocked temporarily. You can start a new random chat.',
     app_background: 'Chat ended when the app stayed in the background.',
     verification_cancelled: 'You left before completing security verification.',
     user_left: 'You left the chat.',
@@ -60,6 +61,11 @@ export default function ChatEndedScreen({ navigation, route }) {
           </Text>
 
           <View style={s.btns}>
+            <Button title="Next random chat" onPress={async () => {
+              try { await connectSocket(); const result = await findRandom();
+                navigation.replace(result.status === 'matched' ? 'Chat' : 'Waiting', result.status === 'matched' ? { roomId: result.roomId, chatMode: 'random' } : undefined);
+              } catch { navigation.replace('Home'); }
+            }} />
             <Button
               variant="primary"
               size="lg"

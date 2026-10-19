@@ -80,7 +80,7 @@ export default function SavedFilesScreen({ navigation }) {
     onPress={onPress} style={s.button}><Text style={{ color: disabled ? colors.textTertiary : colors.accent }}>{label}</Text></TouchableOpacity>;
   return <SafeAreaView style={[s.screen, { backgroundColor: colors.background || colors.surface }]}>
     <View style={s.header}>{action('Back', () => navigation.goBack())}<Text style={[s.title, { color: colors.text }]}>Saved Files</Text></View>
-    <FlatList data={items} keyExtractor={(item) => item.id} contentContainerStyle={s.list}
+    <FlatList style={{ flex: 1 }} data={items} keyExtractor={(item) => item.id} contentContainerStyle={s.list}
       ListHeaderComponent={<>
     <Text style={[s.note, { color: colors.textSecondary }]}>Saved privately in Whisper. Files remain here after a chat ends or the app restarts.</Text>
     <View style={s.row}><Text style={[s.note, { color: colors.text }]}>Lock Saved Files</Text>
@@ -116,6 +116,6 @@ export default function SavedFilesScreen({ navigation }) {
   </SafeAreaView>;
 }
 const s = StyleSheet.create({ screen: { flex: 1 }, header: { flexDirection: 'row', alignItems: 'center' },
-  title: { fontSize: 22, fontWeight: '600' }, note: { padding: 16 }, list: { paddingHorizontal: 16 },
-  row: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, paddingVertical: 12 },
+  title: { flex: 1, fontSize: 22, fontWeight: '600' }, note: { padding: 16 }, list: { paddingHorizontal: 16 },
+  row: { flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, paddingVertical: 12 },
   item: { flex: 1, paddingVertical: 8 }, button: { padding: 16, minHeight: 48, justifyContent: 'center' } });

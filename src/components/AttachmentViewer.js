@@ -129,7 +129,7 @@ function AttachmentContent({ message, onClose, onSave }) {
   </SafeAreaView>;
 }
 const s = StyleSheet.create({
-  cover: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 100 },
+  cover: { ...StyleSheet.absoluteFill, backgroundColor: '#000', zIndex: 100 },
   header: { flexDirection: 'row', alignItems: 'center' },
   button: { padding: 16, alignItems: 'center' },
   title: { color: '#fff', flex: 1 },

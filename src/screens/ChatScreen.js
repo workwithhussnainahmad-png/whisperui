@@ -813,6 +813,17 @@ export default function ChatScreen({ navigation, route }) {
             onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
           />
 
+          {messages.filter(message => message.vaultId && message.delivery === 'sending').map(message => (
+            <View key={`transfer-${message.id}`} style={[styles.savingRow, { borderBottomColor: colors.separator }]}>
+              <Text style={[styles.flex, typography.caption, { color: colors.text }]}>
+                {message.sendStage === 'finishing' ? 'Finishing' : message.sendStage === 'checking' ? 'Checking saved file' : `Sending ${Math.round((message.progress || 0) * 100)}%`}
+              </Text>
+              {message.sendStage !== 'finishing' && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel file send"
+                style={{ padding: sp.md }} onPress={() => vaultSends.current.get(message.id)?.abort()}>
+                <Text style={{ color: colors.accent }}>Cancel send</Text>
+              </TouchableOpacity>}
+            </View>
+          ))}
           <View style={[styles.typingRow, { paddingHorizontal: horizontalPadding, backgroundColor: colors.surface }]}>
             {peerTyping ? <TypingIndicator /> : <View style={{ height: 8 }} />}
           </View>
@@ -947,13 +958,13 @@ const styles = StyleSheet.create({
   },
   notice: { paddingVertical: sp.sm, paddingHorizontal: sp.md },
   securingOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 10,
   },
   privacyOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 30,

@@ -37,5 +37,5 @@ export default function VaultAttachmentPicker({ onSelect, onClose }) {
       </TouchableOpacity>} />
   </SafeAreaView>;
 }
-const s = StyleSheet.create({ cover: { ...StyleSheet.absoluteFillObject, zIndex: 100 }, header: { flexDirection: 'row', alignItems: 'center', paddingLeft: 16 },
+const s = StyleSheet.create({ cover: { ...StyleSheet.absoluteFill, zIndex: 100 }, header: { flexDirection: 'row', alignItems: 'center', paddingLeft: 16 },
   title: { flex: 1, fontSize: 20, fontWeight: '600' }, button: { padding: 16, minHeight: 48 }, note: { padding: 16 }, item: { padding: 18, borderBottomWidth: 1 } });

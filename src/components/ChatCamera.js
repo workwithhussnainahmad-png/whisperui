@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Image, TouchableOpacity, StyleSheet, Alert, BackHandler, AppState, Platform } from 'react-native';
+import { View, Text, Image, TouchableOpacity, StyleSheet, Alert, BackHandler, AppState, Platform, useWindowDimensions } from 'react-native';
 import { CameraView, Camera } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import PrivateVideo from './PrivateVideo';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { recordCleanup } from '../services/cleanupStatus';
 
 // Render inside the chat's secure native window, never an external camera app.
 export default function ChatCamera({ onDone }) {
+  const { width, height } = useWindowDimensions();
+  const [area, setArea] = useState({ width, height });
   const camera = useRef(null);
   const active = useRef(true);
   const busy = useRef(false);
@@ -20,7 +24,7 @@ export default function ChatCamera({ onDone }) {
   const [recording, setRecording] = useState(false);
   const [working, setWorking] = useState(false);
   const [preview, setPreview] = useState(null);
-  const remove = (uri) => uri ? FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {}) : Promise.resolve();
+  const remove = (uri) => uri ? FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false)) : Promise.resolve();
   const close = () => {
     active.current = false;
     camera.current?.stopRecording();
@@ -70,13 +74,18 @@ export default function ChatCamera({ onDone }) {
       setPictureSize(undefined); setReady(false); setMode(next);
     } finally { busy.current = false; }
   };
-  return <View style={s.cover}>
+  const dimensions = pictureSize?.split('x').map(Number);
+  const ratio = mode === 'video' ? 16 / 9 : dimensions?.[0] / dimensions?.[1] || 4 / 3;
+  const displayRatio = width > height ? ratio : 1 / ratio;
+  const previewWidth = Math.min(area.width, area.height * displayRatio);
+  return <SafeAreaView style={s.cover}>
     <View style={s.header}><TouchableOpacity onPress={close} style={s.button} accessibilityLabel="Close camera"><Text style={s.text}>Cancel</Text></TouchableOpacity>
       <Text style={s.text}>{recording ? 'Recording — tap Stop' : preview ? 'Review capture' : 'Camera'}</Text></View>
     {preview ? <>
       {preview.type === 'image' ? <Image source={{ uri: preview.uri }} style={s.preview} resizeMode="contain" />
         : <PrivateVideo uri={preview.uri} playing={true} style={s.preview} />}
       <View style={s.row}>
+        <TouchableOpacity style={s.button} onPress={close}><Text style={s.text}>Discard</Text></TouchableOpacity>
         <TouchableOpacity disabled={working} style={s.button} onPress={async () => {
           if (busy.current) return;
           busy.current = true; setWorking(true);
@@ -89,10 +98,11 @@ export default function ChatCamera({ onDone }) {
           owned.current = null; // Ownership transfers to attachment preparation.
           active.current = false;
           callback.current(preview);
-        }}><Text style={s.text}>Use {preview.type === 'image' ? 'photo' : 'video'}</Text></TouchableOpacity>
+        }}><Text style={s.text}>Send</Text></TouchableOpacity>
       </View>
     </> : <>
-      <CameraView key={`${mode}-${facing}`} ref={camera} style={s.preview} mode={mode} facing={facing}
+      <View style={s.preview} onLayout={({ nativeEvent: { layout } }) => setArea(layout)}>
+      <CameraView key={`${mode}-${facing}`} ref={camera} style={{ width: previewWidth, height: previewWidth / displayRatio, alignSelf: 'center' }} ratio={mode === 'video' ? '16:9' : '4:3'} mode={mode} facing={facing}
         videoQuality="2160p" pictureSize={Platform.OS === 'ios' ? 'Photo' : pictureSize}
         onCameraReady={async () => {
           const view = camera.current;
@@ -113,6 +123,7 @@ export default function ChatCamera({ onDone }) {
           if (active.current) setReady(true);
         }}
         onMountError={() => { Alert.alert('Camera unavailable', 'Close the camera and try again.'); close(); }} />
+      </View>
       <View style={s.row}>
         <TouchableOpacity disabled={working} style={s.button} onPress={() => selectMode('picture')}><Text style={[s.text, mode === 'picture' && s.selected]}>Photo</Text></TouchableOpacity>
         <TouchableOpacity disabled={working} style={s.button} onPress={() => selectMode('video')}><Text style={[s.text, mode === 'video' && s.selected]}>Video</Text></TouchableOpacity>
@@ -125,13 +136,13 @@ export default function ChatCamera({ onDone }) {
         </TouchableOpacity>
       </View>
     </>}
-  </View>;
+  </SafeAreaView>;
 }
 const s = StyleSheet.create({
-  cover: { ...StyleSheet.absoluteFillObject, backgroundColor: '#000', zIndex: 20 },
-  preview: { flex: 1, width: '100%' },
+  cover: { ...StyleSheet.absoluteFill, backgroundColor: '#000', zIndex: 20 },
+  preview: { flex: 1, minHeight: 0, width: '100%' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 16 },
-  row: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingBottom: 12 },
+  row: { flexWrap: 'wrap', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingBottom: 12 },
   button: { padding: 18 }, text: { color: '#fff', fontSize: 16 },
   selected: { color: '#ffd54f', fontWeight: '700' },
   shutter: { padding: 20, borderWidth: 2, borderColor: '#fff', borderRadius: 40 },

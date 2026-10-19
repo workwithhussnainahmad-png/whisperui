@@ -406,7 +406,7 @@ const s = StyleSheet.create({
   safe: { flex: 1 },
   flex: { flex: 1 },
   privacyOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 30,

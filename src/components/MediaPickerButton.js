@@ -10,6 +10,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Camera } from 'expo-camera';
 import * as FileSystem from 'expo-file-system/legacy';
 import Icon from './Icon';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { sp, radius, shadows } from '../theme';
 import { useTheme } from '../hooks/useTheme';
 import { useResponsiveLayout } from '../hooks/useResponsiveLayout';
@@ -34,6 +35,7 @@ function confirmPrivacyWarning(title, message) {
 }
 
 export default function MediaPickerButton({ onImageSelected, onVideoSelected, onFileSelected, onProcessingChange, onOpenCamera, onOpenVault, disabled = false }) {
+  const insets = useSafeAreaInsets();
   const [open, setOpen] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isPicking, setIsPicking] = useState(false);
@@ -172,7 +174,7 @@ export default function MediaPickerButton({ onImageSelected, onVideoSelected, on
             <View
               style={[
                 s.sheet,
-                { backgroundColor: colors.surface1, borderColor: colors.hairline },
+                { backgroundColor: colors.surface1, borderColor: colors.hairline, paddingBottom: Math.max(insets.bottom, sp.xl) },
                 isTablet && s.sheetTablet,
               ]}
             >

@@ -153,7 +153,7 @@ export function createPrivateVaultStore(io) {
         reader = chunkReader(e, key, ensureActive);
         for (let i = 0; i < Math.ceil(e.size / VAULT_CHUNK); i++) {
           reader.readChunk(i).fill(0);
-          if (i % 8 === 7) await io.yield();
+          await io.yield(); // Let Cancel and background events run between authentication chunks.
         }
         reader.close(); ensureActive(); reader = chunkReader(e, key, ensureActive);
         if (!leases.has(id)) leases.set(id, new Set());

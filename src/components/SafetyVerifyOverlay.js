@@ -77,7 +77,7 @@ export default function SafetyVerifyOverlay({ safetyCode, onVerify, onLeave }) {
 
 const s = StyleSheet.create({
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 20,

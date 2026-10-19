@@ -4,7 +4,7 @@ import nacl from 'tweetnacl';
 import { isValidBase64 } from './payloadValidation';
 
 // Protocol 7: libsignal owns message encryption, key agreement and ratcheting.
-// The invite authenticates/encrypts ephemeral public bundles. Private protocol
+// Legacy secret bindings authenticate bundles; lookup mode relies on safety comparison. Private protocol
 // keys stay native. There is no legacy-crypto or Expo Go fallback.
 const native = requireOptionalNativeModule('WhisperSignal');
 export const PROTOCOL_VERSION = 7;
@@ -42,8 +42,10 @@ function requireBridge() {
 }
 export function assertCryptoAvailable() { requireBridge(); }
 function bindingKey() {
-  if (!INVITE_RE.test(invite || '') || !room) throw new Error('A secret invite and room are required');
-  const input = bytes(JSON.stringify(['whisper-invite-bundle-v7', room, invite]));
+  if (!room || (invite !== null && !INVITE_RE.test(invite))) throw new Error('A valid binding and room are required');
+  // In lookup mode this envelope key is PUBLIC, only preserving the bundle wire format.
+  // Peer authentication comes from comparing libsignal identity fingerprints.
+  const input = bytes(JSON.stringify([invite ? 'whisper-invite-bundle-v7' : 'whisper-public-bundle-v7', room, invite]));
   const digest = nacl.hash(input);
   const key = digest.slice(0, 32);
   input.fill(0); digest.fill(0);

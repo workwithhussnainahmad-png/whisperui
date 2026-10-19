@@ -757,7 +757,7 @@ export default function ChatScreen({ navigation, route }) {
                   isTablet && { fontSize: 12 },
                 ]}>
                   {chatMode === 'invite'
-                    ? `Verified by invite code - ${safetyCode}`
+                    ? `Safety code compared - ${safetyCode}`
                     : 'Encrypted - peer unverified'}
                 </Text>
               )}

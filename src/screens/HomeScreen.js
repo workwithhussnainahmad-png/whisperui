@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, Pressable, TextInput, StyleSheet, Image,
-  Alert, KeyboardAvoidingView, Platform, Keyboard, Modal,
+  Alert, KeyboardAvoidingView, Platform, Keyboard, Modal, Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, scanFromURLAsync } from 'expo-camera';
@@ -136,6 +136,17 @@ export default function HomeScreen({ navigation }) {
   }, [navigation]);
 
   const groupRoomInactive = groupStatus.loaded && !groupStatus.isActive;
+  useEffect(() => {
+    let active = true;
+    const accept = url => {
+      const code = extractInviteCode(url);
+      if (active && code) setInviteCode(formatInviteCodeForUser(code));
+    };
+    Linking.getInitialURL().then(accept).catch(() => {});
+    const subscription = Linking.addEventListener('url', event => accept(event.url));
+    return () => { active = false; subscription.remove(); };
+  }, []);
+
   const homeActionBusy = isFindingRandom || isCreating || isJoiningInvite;
   const groupCount = groupStatus.loaded ? String(groupStatus.activeUsers) : '—';
 
@@ -147,14 +158,14 @@ export default function HomeScreen({ navigation }) {
 
   useEffect(() => {
     if (!generatedCode) return;
-    // Expire slightly before the relay's five-minute TTL (network transit time).
+    // Expire slightly before the relay's default ten-minute TTL (network transit time).
     const timer = setTimeout(() => {
       cancelInvite();
       pendingInviteRef.current = null;
       setGeneratedCode(null);
       setShowQr(false);
       Alert.alert('Invite expired', 'Create a new invite and share the complete code.');
-    }, 290000);
+    }, 590000);
     return () => clearTimeout(timer);
   }, [generatedCode]);
 
@@ -388,7 +399,7 @@ export default function HomeScreen({ navigation }) {
               </Pressable>}
 
               {!ALLOW_UNVERIFIED_CHATS && <Text style={[typography.caption, { color: colors.textSecondary }]}>
-                Private invites only. Share your invite through a trusted channel.
+                Private invites only. Compare safety codes before chatting.
               </Text>}
 
               <View style={s.halfRow}>
@@ -436,7 +447,7 @@ export default function HomeScreen({ navigation }) {
                   >
                     {formatInviteCodeForUser(generatedCode)}
                   </Text>
-                  <Text style={[typography.micro, { color: colors.textTertiary }]}>Expires in 5 min - One-time use</Text>
+                  <Text style={[typography.micro, { color: colors.textTertiary }]}>Expires in 10 min - One-time use</Text>
                   <Text style={[typography.micro, { color: colors.textSecondary, textAlign: 'center', marginTop: sp.xs }]}>
                     Share the full code to start a verified private chat.
                   </Text>
@@ -466,7 +477,7 @@ export default function HomeScreen({ navigation }) {
                   <View style={s.joinRow}>
                     <TextInput
                       style={[s.joinInput, { backgroundColor: colors.surface2, borderColor: colors.border, color: colors.text }]}
-                      placeholder="Paste TALK-… invite code"
+                      placeholder="ABC-DEF"
                       placeholderTextColor={colors.textTertiary}
                       value={inviteCode}
                       onChangeText={(value) => {
@@ -517,7 +528,7 @@ export default function HomeScreen({ navigation }) {
 
         {!keyboardVisible && (
           <Text style={[s.footer, { color: colors.textTertiary }]}>
-            Invite chats are verified by code. Random chats are encrypted but peer-unverified.
+            Join codes only locate a chat. Compare safety codes to verify your contact.
           </Text>
         )}
       </KeyboardAvoidingView>
@@ -531,7 +542,7 @@ export default function HomeScreen({ navigation }) {
               Share this QR image, or let your contact scan it directly.
             </Text>
             {generatedCode && <InviteQr value={formatInviteCodeForUser(generatedCode)} />}
-            <Text style={[typography.micro, { color: colors.textTertiary, marginTop: sp.md }]}>One-time use - Expires in 5 minutes</Text>
+            <Text style={[typography.micro, { color: colors.textTertiary, marginTop: sp.md }]}>One-time use - Expires in 10 minutes</Text>
             <Button variant="primary" fullWidth title={isSharingQr ? 'Preparing QR…' : 'Share QR Image'} disabled={isSharingQr} icon="share-outline" style={{ marginTop: sp.md }} onPress={handleShareInvite} />
             <Button variant="ghost" fullWidth title="Close" style={{ marginTop: sp.sm }} onPress={() => setShowQr(false)} />
           </View>

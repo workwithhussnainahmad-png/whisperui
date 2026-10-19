@@ -76,9 +76,23 @@ test('missing or mismatched native protocol fails closed, including Expo Go', as
     await assert.rejects(e.generateKeys(), /native build/);
   }
 });
-test('chat encryption requires a full secret invite', async () => {
-  const e = loadE2e(); e.setRoomBinding('room');
-  await assert.rejects(e.generateKeys(), /secret invite/);
+test('lookup mode establishes libsignal encryption without using a join code as a secret', async () => {
+  const a = loadE2e(), b = loadE2e();
+  try {
+    a.setRoomBinding('lookup-room'); b.setRoomBinding('lookup-room');
+    const pubA = await a.generateKeys(), pubB = await b.generateKeys();
+    await confirmPair({ a, b, pubA, pubB, roomA: 'lookup-room', roomB: 'lookup-room' });
+    assert.equal(await b.decrypt(await a.encrypt('lookup mode')), 'lookup mode');
+    assert.equal(await a.getSafetyCode(), await b.getSafetyCode());
+  } finally { a.destroy(); b.destroy(); }
+});
+
+test('six-character lookup accepts formatting/deep links and rejects legacy secret codes', () => {
+  const { normalizeJoinCode, displayJoinCode } = loadService('joinCode');
+  assert.equal(normalizeJoinCode('aBc - deF'), 'ABCDEF');
+  assert.equal(normalizeJoinCode('whisperchat://join/ABC-DEF'), 'ABCDEF');
+  assert.equal(displayJoinCode('abcdef'), 'ABC-DEF');
+  for (const invalid of [INVITE, 'ABC0EF', 'ABCIEF', 'ABCLEF', 'ABCOEF', 'ABC1EF', 'ABCDE', 'ABCDEFG']) assert.equal(normalizeJoinCode(invalid), null);
 });
 
 function loadService(name) {

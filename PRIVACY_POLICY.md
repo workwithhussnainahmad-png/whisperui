@@ -154,3 +154,9 @@ We may update this Privacy Policy from time to time. Any changes will be reflect
 If you have any questions or concerns about this Privacy Policy, please contact us at:
 
 Email: workwithhussnainahmad@gmail.com
+
+
+## Explicit external sharing from Saved Files
+Saved Files offers Share a copy outside Whisper after authentication when locked. The encrypted original is not deleted or changed. Supported images are converted to JPEG and metadata stripped; supported video/audio containers are rebuilt without original container metadata. PDF flattening and Office-to-text conversion require confirmation and remove document features. Unsupported formats or failed metadata removal are not shared. This does not remove identifying visible content or guarantee removal of information encoded within media streams.
+
+A generic-named sanitized copy is placed in a dedicated private, backup-excluded cache directory and handed to the selected app through the system share sheet. Only QR and sanitized-export directories are exposed by the Android sharing provider, not the vault or chat cache. Copies are deleted after the share flow returns; Android retains them while the receiving activity is open. Startup removes leftovers after a crash, and Reset Whisper removes the export directory. The receiving app controls its own copy, storage, cloud uploads, and backups. Whisper cannot delete copies retained by another app.

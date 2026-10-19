@@ -1,4 +1,4 @@
-// Only invite QR images may enter the FileProvider-visible directory.
+// Invite QR sharing uses its own narrowly scoped FileProvider directory.
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as Crypto from 'expo-crypto';
@@ -10,7 +10,7 @@ export function cleanAbandonedExports() {
   if (!startupCleanup) startupCleanup = observeCleanup('startup-exports', async () => {
     await preparePrivateStorage();
     if (FileSystem.cacheDirectory) {
-      for (const name of ['whisper-exports', 'whisper-share']) await FileSystem.deleteAsync(`${FileSystem.cacheDirectory}${name}/`, { idempotent: true });
+      for (const name of ['whisper-exports', 'whisper-share', 'whisper-vault-share']) await FileSystem.deleteAsync(`${FileSystem.cacheDirectory}${name}/`, { idempotent: true });
     }
     await initializeAttachmentTools();
   }).catch(error => { startupCleanup = null; throw error; });

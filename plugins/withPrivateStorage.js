@@ -9,7 +9,7 @@ const resources = {
   // App resources override the dependency's identically named broad resource.
   'file_system_provider_paths.xml': '<paths />\n',
   'image_picker_provider_paths.xml': '<paths />\n',
-  'sharing_provider_paths.xml': '<paths><cache-path name="whisper_qr" path="whisper-share/" /></paths>\n',
+  'sharing_provider_paths.xml': '<paths><cache-path name="whisper_qr" path="whisper-share/" /><cache-path name="whisper_vault_export" path="whisper-vault-share/" /></paths>\n',
 };
 module.exports = function withPrivateStorage(config) {
   config = withEntitlementsPlist(config, mod => {

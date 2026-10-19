@@ -9,7 +9,7 @@ const plist = require('@expo/plist').default;
 const plugin = require('../plugins/withPrivateStorage');
 const { transformSync } = require('@babel/core');
 
-test('prebuild plugin generates deny-all backup rules and QR-only FileProvider; repeat is stable', async t => {
+test('prebuild plugin generates deny-all backup rules and QR and sanitized-export-only FileProvider; repeat is stable', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whisper-config-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const main = path.join(root, 'android/app/src/main');
@@ -34,10 +34,12 @@ test('prebuild plugin generates deny-all backup rules and QR-only FileProvider; 
     for (const name of ['file_system_provider_paths.xml', 'image_picker_provider_paths.xml']) assert.equal((await xml(name)).paths, '');
     const provider = (await xml('sharing_provider_paths.xml')).paths;
     assert.deepEqual(Object.keys(provider), ['cache-path']);
-    assert.deepEqual(provider['cache-path'], [{ $: { name: 'whisper_qr', path: 'whisper-share/' } }]);
+    assert.deepEqual(provider['cache-path'], [{ $: { name: 'whisper_qr', path: 'whisper-share/' } }, { $: { name: 'whisper_vault_export', path: 'whisper-vault-share/' } }]);
     for (const forbidden of ['../no_backup/vault/a.box', 'whisper-chat-media/a.png', 'Camera/a.jpg', 'whisper-share/../whisper-chat-media/a.png']) {
-      const allowed = path.resolve('/cache/whisper-share') + path.sep;
-      assert.equal(path.resolve('/cache', forbidden).startsWith(allowed), false);
+      for (const entry of provider['cache-path']) {
+        const allowed = path.resolve('/cache', entry.$.path) + path.sep;
+        assert.equal(path.resolve('/cache', forbidden).startsWith(allowed), false);
+      }
     }
   }
   const library = await parseStringPromise(fs.readFileSync('node_modules/expo-sharing/android/src/main/AndroidManifest.xml', 'utf8'));
@@ -73,7 +75,7 @@ test('cleanup status logs only allowlisted categories and counts even with malic
   assert.equal(api.getCleanupStatus().categories.other, 1);
 });
 for (const failure of [false, true]) test(`QR sharing uses only dedicated directory and deletes on ${failure ? 'failure' : 'success'}`, async () => {
-  const files = new Map([['file:///cache/whisper-share/old.png', 'old']]);
+  const files = new Map([['file:///cache/whisper-share/old.png', 'old'], ['file:///cache/whisper-vault-share/old/file.jpg', 'leftover']]);
   const protectedPaths = [], shared = [];
   const api = load('mediaExport', {
     'expo-file-system/legacy': { cacheDirectory: 'file:///cache/', EncodingType: { Base64: 'base64' }, makeDirectoryAsync: async () => {},

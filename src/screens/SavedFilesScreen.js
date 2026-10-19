@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, Alert, AppState, StyleSheet, ActivityIndicator, Switch, TextInput, ScrollView, KeyboardAvoidingView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { externalShareDescription, shareSavedFile } from '../services/vaultExport';
 import Icon from '../components/Icon';
 import AttachmentViewer from '../components/AttachmentViewer';
 import { listSavedFiles, deleteSavedFile, vaultError, beginVaultSession, subscribeVaultLock, getVaultLockState, configureVaultLock, disableVaultLock, lockSavedFiles } from '../services/privateVault';
@@ -10,6 +11,7 @@ import { useTheme } from '../hooks/useTheme';
 
 export default function SavedFilesScreen({ navigation }) {
   const { colors } = useTheme();
+  const [exporting, setExporting] = useState(false);
   const [items, setItems] = useState([]), [error, setError] = useState('');
   const [busy, setBusy] = useState(true), [viewing, setViewing] = useState(null);
   const [lockState, setLockState] = useState(getVaultLockState());
@@ -68,6 +70,25 @@ export default function SavedFilesScreen({ navigation }) {
         { text: enabled ? 'Enable lock' : 'Disable lock', onPress: () => changeLock(enabled, lockState.timeout) },
       ]);
   }
+  function share(item) {
+    let description;
+    try { description = externalShareDescription(item); }
+    catch (error) { Alert.alert('Cannot share this file', error.message); return; }
+    Alert.alert('Share a copy outside Whisper?', description, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Prepare and share', onPress: async () => {
+        if (working.current) return;
+        working.current = true; setBusy(true); setExporting(true); setError(''); setViewing(null);
+        try {
+          await shareSavedFile(item, (title, message) => new Promise(resolve => Alert.alert(title, message, [
+            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+            { text: 'Convert and share', onPress: () => resolve(true) },
+          ], { cancelable: true, onDismiss: () => resolve(false) })), () => mounted.current);
+        } catch (error) { if (mounted.current) Alert.alert('Could not share file', error.message || 'Please retry.'); }
+        finally { working.current = false; if (mounted.current) { setBusy(false); setExporting(false); } }
+      } },
+    ]);
+  }
   function remove(item) {
     Alert.alert('Delete saved file?', `Delete “${item.name}” from private Saved Files?`, [
       { text: 'Cancel', style: 'cancel' },
@@ -116,7 +137,7 @@ export default function SavedFilesScreen({ navigation }) {
         : 'Saved Files is locked. Authenticate to view, save or send files.'}</Text>
       {action(lockState.recovery ? 'Retry unlock' : 'Unlock Saved Files', reload)}
     </View>}
-    {busy && <ActivityIndicator accessibilityLabel="Loading private files" color={colors.accent} />}
+    {busy && <View style={{ alignItems: 'center', padding: 16, gap: 8 }}><ActivityIndicator accessibilityLabel={exporting ? "Preparing share copy" : "Loading private files"} color={colors.accent} />{exporting && <Text style={{ color: colors.textSecondary }}>Preparing or sharing a private copy...</Text>}</View>}
     {!!error && <View><Text accessibilityRole="alert" style={[s.note, { color: colors.danger }]}>{error}</Text>{action('Retry', reload, busy)}</View>}
       </>}
       ListEmptyComponent={!busy && !error && !lockState.locked ? <View style={{ alignItems: 'center', paddingVertical: 48, paddingHorizontal: 24 }}><Icon name="folder-open-outline" size={52} color={colors.accent} /><Text style={{ color: colors.text, fontSize: 20, fontWeight: '600', marginTop: 20 }}>Your private collection starts here</Text><Text style={{ color: colors.textSecondary, textAlign: 'center', lineHeight: 22, marginTop: 10 }}>Tap Save on an attachment in chat to keep it here.</Text></View> : null}
@@ -128,7 +149,7 @@ export default function SavedFilesScreen({ navigation }) {
           <Text style={{ color: colors.text, fontWeight: '600', fontSize: 15 }} numberOfLines={2}>{item.name}</Text>
           <Text style={{ color: colors.textSecondary }}>{item.mime.split('/')[1]?.toUpperCase()} · {item.size >= 1048576 ? (item.size / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(item.size / 1024)) + ' KB'}</Text>
           <Text style={{ color: colors.textSecondary }}>{new Date(item.savedAt).toLocaleDateString()}</Text>
-        </TouchableOpacity><TouchableOpacity accessibilityLabel={`Delete ${item.name}`} disabled={busy} onPress={() => remove(item)} style={{ padding: 12 }}><Icon name="trash-outline" size={20} color={colors.textSecondary} /></TouchableOpacity>
+        </TouchableOpacity><TouchableOpacity accessibilityLabel={`Share ${item.name} to another app`} disabled={busy} onPress={() => share(item)} style={{ padding: 12 }}><Icon name="share-outline" size={22} color={colors.accent} /></TouchableOpacity><TouchableOpacity accessibilityLabel={`Delete ${item.name}`} disabled={busy} onPress={() => remove(item)} style={{ padding: 12 }}><Icon name="trash-outline" size={20} color={colors.textSecondary} /></TouchableOpacity>
       </View>} />
     {action('Reset Whisper', reset, busy)}
     {destructive && <SafeAreaView style={[StyleSheet.absoluteFill, { backgroundColor: colors.surface }]}><KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', padding: 24 }}>

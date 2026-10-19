@@ -1,3 +1,5 @@
+> External sharing update: the user explicitly authorized sanitized copies from Saved Files. The sharing provider now exposes both `cache/whisper-share/` (QR) and `cache/whisper-vault-share/` (sanitized exports), while vault/chat-cache paths remain blocked. See [VAULT_EXTERNAL_SHARING.md](VAULT_EXTERNAL_SHARING.md). Earlier QR-only statements below describe the original Phase 3 scope.
+
 # Phase 3: backup and sharing hardening
 
 ## Implementation

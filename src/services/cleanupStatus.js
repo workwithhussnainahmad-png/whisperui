@@ -1,5 +1,5 @@
 // Never accept an Error, path, filename or arbitrary log text.
-const allowed = new Set(['startup-media', 'startup-exports', 'startup-captures', 'capture-protection', 'attachment-delete', 'scratch-delete', 'qr-delete', 'native-temp', 'storage-protection']);
+const allowed = new Set(['startup-media', 'startup-exports', 'startup-captures', 'capture-protection', 'attachment-delete', 'scratch-delete', 'qr-delete', 'external-share-delete', 'native-temp', 'storage-protection']);
 let status = { last: 'not-run', attempts: 0, failures: 0, categories: {} };
 export function recordCleanup(category, ok) {
   const safe = allowed.has(category) ? category : 'other';

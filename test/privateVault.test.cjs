@@ -180,13 +180,14 @@ test('delete removes the file and encrypted index entry permanently across resta
 });
 test('Reset Whisper disconnects and wipes files, index and durable master key', async (t) => {
   const f = fixture(t), store = f.store(); await store.save(f.source(Buffer.from('erase me')), metadata);
-  let disconnected = false;
+  let disconnected = false, exportsCleared = false;
   const { resetWhisper } = moduleFrom('accountReset', {
     './socket': { disconnectSocket: () => { disconnected = true; } },
     './privateVault': { wipePrivateVault: () => store.wipe() },
+    './vaultExport': { clearExternalShareFiles: async () => { exportsCleared = true; } },
   });
   await resetWhisper();
-  assert(disconnected); assert.equal(f.hasKey(), false); assert.equal(fs.existsSync(f.root), false);
+  assert(exportsCleared); assert(disconnected); assert.equal(f.hasKey(), false); assert.equal(fs.existsSync(f.root), false);
   assert.deepEqual(await f.store().list(), []);
 });
 test('reset cancels an in-flight save and cannot resurrect vault contents', async (t) => {
@@ -201,6 +202,7 @@ test('reset still erases the vault if anonymous-session cleanup fails', async (t
   const { resetWhisper } = moduleFrom('accountReset', {
     './socket': { disconnectSocket: () => { throw new Error('Session cleanup failed'); } },
     './privateVault': { wipePrivateVault: () => store.wipe() },
+    './vaultExport': { clearExternalShareFiles: async () => {} },
   });
   await assert.rejects(resetWhisper(), /Session cleanup failed/);
   assert.equal(f.hasKey(), false); assert.equal(fs.existsSync(f.root), false);

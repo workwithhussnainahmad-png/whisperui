@@ -803,8 +803,6 @@ export default function ChatScreen({ navigation, route }) {
             keyboardDismissMode="on-drag"
             keyboardShouldPersistTaps="handled"
             automaticallyAdjustKeyboardInsets={false}
-            onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
-            onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
           />
 
           {preparingAttachment && <View accessibilityRole="progressbar" accessibilityLabel="Preparing attachment"
@@ -812,17 +810,6 @@ export default function ChatScreen({ navigation, route }) {
             <ActivityIndicator size="small" color={colors.accent} />
             <Text style={[typography.caption, { color: colors.textSecondary }]}>Preparing attachment...</Text>
           </View>}
-          {messages.filter(message => ['image', 'video', 'file'].includes(message.type) && message.delivery === 'sending').map(message => (
-            <View key={`transfer-${message.id}`} style={[styles.savingRow, { borderBottomColor: colors.separator }]}>
-              <Text style={[styles.flex, typography.caption, { color: colors.text }]}>
-                {message.sendStage === 'finishing' ? 'Finishing' : message.sendStage === 'checking' ? 'Checking saved file' : `Sending ${Math.round((message.progress || 0) * 100)}%`}
-              </Text>
-              {message.sendStage !== 'finishing' && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cancel file send"
-                style={{ padding: sp.md }} onPress={() => vaultSends.current.get(message.id)?.abort()}>
-                <Text style={{ color: colors.accent }}>Cancel send</Text>
-              </TouchableOpacity>}
-            </View>
-          ))}
           <View style={[styles.typingRow, { paddingHorizontal: horizontalPadding, backgroundColor: colors.surface }]}>
             {peerTyping ? <TypingIndicator /> : <View style={{ height: 8 }} />}
           </View>

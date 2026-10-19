@@ -24,6 +24,7 @@ export default function ChatCamera({ onDone }) {
   const [pictureSize, setPictureSize] = useState(undefined);
   const configuredCamera = useRef(null);
   const [recording, setRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [working, setWorking] = useState(false);
   const [preview, setPreview] = useState(null);
   const remove = (uri) => uri ? FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => recordCleanup('scratch-delete', false)) : Promise.resolve();
@@ -49,7 +50,7 @@ export default function ChatCamera({ onDone }) {
     if (!ready || busy.current) return;
     busy.current = true; setWorking(true);
     try {
-      if (mode === 'video') setRecording(true);
+      if (mode === 'video') { setRecordingSeconds(0); setRecording(true); }
       const result = mode === 'video'
         ? await camera.current.recordAsync()
         : await camera.current.takePictureAsync({ quality: 1, exif: false, shutterSound: false });
@@ -61,9 +62,15 @@ export default function ChatCamera({ onDone }) {
       if (active.current) Alert.alert('Camera unavailable', 'Could not capture media. Please try again.');
     } finally {
       busy.current = false;
-      if (active.current) { setWorking(false); setRecording(false); }
+      if (active.current) { setWorking(false); setRecording(false); setRecordingSeconds(0); }
     }
   };
+  useEffect(() => {
+    if (!recording) return undefined;
+    const timer = setInterval(() => setRecordingSeconds((seconds) => seconds + 1), 1000);
+    return () => clearInterval(timer);
+  }, [recording]);
+  const recordingTime = `${Math.floor(recordingSeconds / 60)}:${String(recordingSeconds % 60).padStart(2, '0')}`;
   const selectMode = async (next) => {
     if (busy.current || next === mode) return;
     busy.current = true;
@@ -85,7 +92,7 @@ export default function ChatCamera({ onDone }) {
   const previewWidth = Math.min(area.width, area.height * displayRatio);
   return <SafeAreaView style={s.cover}>
     <View style={s.header}><TouchableOpacity onPress={close} style={s.button} accessibilityLabel="Close camera"><Icon name="close" size={28} color="#fff" /></TouchableOpacity>
-      <Text style={s.text}>{recording ? 'Recording' : preview ? 'Review capture' : 'Camera'}</Text></View>
+      <View style={s.headerTitle}>{recording && <View style={s.recordingDot} />}<Text style={s.text}>{recording ? `Recording ${recordingTime}` : preview ? 'Review capture' : 'Camera'}</Text></View></View>
     {preview ? <>
       {preview.type === 'image' ? <Image source={{ uri: preview.uri }} style={s.preview} resizeMode="contain" />
         : <PrivateVideo uri={preview.uri} playing={true} style={s.preview} />}
@@ -147,6 +154,8 @@ const s = StyleSheet.create({
   cover: { ...StyleSheet.absoluteFill, backgroundColor: '#000', zIndex: 20 },
   preview: { flex: 1, minHeight: 0, width: '100%' },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: 16 },
+  headerTitle: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  recordingDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: '#ff453a' },
   row: { flexWrap: 'wrap', flexDirection: 'row', justifyContent: 'center', alignItems: 'center', paddingBottom: 12 },
   button: { padding: 18 }, text: { color: '#fff', fontSize: 16 },
   selected: { color: '#ffd54f', fontWeight: '700' },

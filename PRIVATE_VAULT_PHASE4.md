@@ -1,3 +1,7 @@
+# Superseded disable behavior (Phase 4X)
+
+Disabling lock now authenticates, requires typing DELETE, and permanently wipes the vault and all its keys. It never preserves files by re-wrapping. Native pending-wipe recovery completes an interrupted wipe on next access/start. The original Phase 4 design below is historical for enable migration only.
+
 # Phase 4: optional device-authenticated vault lock
 
 Implemented in the native key adapters, vault service/store, lifecycle controller,
@@ -35,10 +39,9 @@ The original master Keychain item retains its original accessibility. Initially 
 holds the legacy master. Enabling creates and verifies a unique protected item,
 then atomically replaces the original item's value with a selector and lock policy.
 That one SecItemUpdate removes the unauthenticated master value at the commit point.
-Disabling authenticates, reads the protected master, and atomically replaces the
-selector with a normal Keychain-protected master record. Old protected items are
-removed after commit, or pruned at startup. There is no fallback to an obsolete item
-if the selected protected key is unavailable. Reset deletes the entire service.
+Disabling authenticates and requires typing DELETE, then permanently wipes the
+vault and all key slots. A durable pending-wipe marker makes deletion resumable.
+There is no re-wrap-on-disable path. Reset deletes the entire key service.
 
 This corrects the initial Step 0 proposal: do not mutate an existing item's ACL;
 Apple documents access-control attributes as add-only. Creating a new protected
@@ -87,7 +90,7 @@ vault lock protects access to the saved content, not already-sent chat metadata.
   files without accessing the master key.
 - Controller tests cover cancelled/failed auth, invalidation/recovery, background,
   manual and timed locks, immediate release, locked reset, and migration interruption
-  before/after the native adapter's commit contract in both directions.
+  before/after the native adapter's enable commit contract; destructive disable cancellation and completion.
 - Service tests cover preview cleanup at background lock and cancelled authentication
   before Save, with unchanged vault contents.
 - Two-client integration locks A during a vault send and checks B publishes no partial
@@ -119,13 +122,10 @@ vault lock protects access to the saved content, not already-sent chat metadata.
    recovery guidance. Re-adding a PIN does not guarantee restoration of an invalidated
    key. Reset while locked must erase files, index, wrapping keys and Keychain items
    without requiring authentication.
-9. Enable and disable repeatedly, verifying hashes and restart persistence. With
-   debugger breakpoints kill the process before wrapper/selector commit, immediately
-   after commit, and during obsolete-key cleanup. Restart must use either the previous
-   or new committed wrapping, never regenerate a key for existing ciphertext. Test
-   both directions. Android: also fault parent-directory sync and verify the active
-   alias is retained. iOS: check the primary item contains only a selector when enabled;
-   no unauthenticated master copy may remain after enabling.
+9. Enable and verify files survive restart. Disable: cancel authentication, then cancel
+   DELETE confirmation; files must remain. Confirm DELETE: all files/keys must disappear,
+   saving must work again. Kill during wipe and restart: deletion must finish.
+   Separately interrupt enable migration before/after commit; existing files must remain readable.
 10. Check device logs: no key material, filenames or authentication details beyond
     generic success/failure categories. Verify normal chat, invite QR sharing and
     Phase 3 backup/provider checks still work.

@@ -211,7 +211,7 @@ test('real mobile clients establish an invite chat through the backend and rejec
     assert.equal(alice.saved.getVaultLockState().locked, true);
     assert.deepEqual([...alice.savedFiles], diskBefore);
     alice.saved.setVaultAppActive(true);
-    await alice.saved.configureVaultLock(false, 60);
+    (await alice.saved.beginVaultSession())();
     // Preflight rejects corrupt/truncated data before any media reaches Bob.
     const filename = `${savedA.id}.box`, original = Buffer.from(alice.savedFiles.get(filename));
     alice.savedFiles.set(filename, original.subarray(0, original.length - 1));

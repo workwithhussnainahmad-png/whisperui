@@ -18,6 +18,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import java.security.SecureRandom
@@ -27,10 +28,31 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 class WhisperVaultModule : Module() {
+  companion object {
+    // Linux fcntl.h O_DIRECTORY flag:
+    // ARM32/ARM64 (armeabi, armeabi-v7a, arm64-v8a, aarch64): 040000 octal = 0x4000 (16384)
+    // x86/x86_64/generic (x86, i686, x86_64, amd64, riscv64): 0200000 octal = 0x10000 (65536)
+    internal const val O_DIRECTORY_ARM = 0x4000
+    internal const val O_DIRECTORY_X86 = 0x10000
+
+    internal fun resolveODirectory(primaryAbi: String? = Build.SUPPORTED_ABIS?.firstOrNull() ?: System.getProperty("os.arch")): Int {
+      val abi = (primaryAbi ?: "").trim().lowercase()
+      return when {
+        abi.startsWith("arm") || abi.startsWith("aarch64") -> O_DIRECTORY_ARM
+        abi.startsWith("x86") || abi.startsWith("i386") || abi.startsWith("i686") || abi.startsWith("amd64") || abi.startsWith("riscv64") -> O_DIRECTORY_X86
+        else -> error("Unsupported device architecture for private vault: $abi")
+      }
+    }
+  }
+
   private val alias = "whisper.private-vault.v1"
   private val root: File get() {
+    synchronized(keyMutex) { recoverWipe() }
     val directory = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "vault")
     check(directory.exists() || directory.mkdirs()) { "Cannot open private vault storage" }
+    val path = directory.toPath()
+    check(!Files.isSymbolicLink(path)) { "Vault root cannot be a symbolic link" }
+    check(Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) { "Vault root is not a directory" }
     return directory
   }
   private fun file(name: String): File {
@@ -43,8 +65,39 @@ class WhisperVaultModule : Module() {
     Files.move(file(from).toPath(), file(to).toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
   }
   private fun syncDirectory() {
-    val directory = android.system.Os.open(root.path, android.system.OsConstants.O_RDONLY or android.system.OsConstants.O_DIRECTORY, 0)
-    try { android.system.Os.fsync(directory) } finally { android.system.Os.close(directory) }
+    val path = root.toPath()
+    check(!Files.isSymbolicLink(path)) { "Vault root cannot be a symbolic link" }
+    check(Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) { "Vault root is not a directory" }
+    val flags = android.system.OsConstants.O_RDONLY or
+      android.system.OsConstants.O_CLOEXEC or
+      android.system.OsConstants.O_NOFOLLOW or
+      resolveODirectory()
+    val directory = android.system.Os.open(root.path, flags, 0)
+    try {
+      val stat = android.system.Os.fstat(directory)
+      check(android.system.OsConstants.S_ISDIR(stat.st_mode)) { "Vault root is not a directory" }
+      check(!android.system.OsConstants.S_ISLNK(stat.st_mode)) { "Vault root cannot be a symbolic link" }
+      android.system.Os.fsync(directory)
+    } finally {
+      android.system.Os.close(directory)
+    }
+  }
+  private fun wipeMarker() = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "vault-wipe.pending")
+  private fun syncParent(directory: File) {
+    val fd = android.system.Os.open(directory.path, android.system.OsConstants.O_RDONLY or android.system.OsConstants.O_NOFOLLOW or resolveODirectory(), 0)
+    try { android.system.Os.fsync(fd) } finally { android.system.Os.close(fd) }
+  }
+  private fun recoverWipe() {
+    val marker = wipeMarker()
+    if (!marker.exists()) return
+    val directory = File(marker.parentFile, "vault")
+    check(!Files.isSymbolicLink(directory.toPath())) { "Vault root cannot be a symbolic link" }
+    val store = keys()
+    store.aliases().toList().filter { it == alias || it.startsWith(wrapPrefix) }.forEach { store.deleteEntry(it) }
+    check(!directory.exists() || directory.deleteRecursively()) { "Could not finish private vault reset. Retry." }
+    syncParent(marker.parentFile!!)
+    check(marker.delete()) { "Could not finish private vault reset. Retry." }
+    syncParent(marker.parentFile!!)
   }
   private val wrapPrefix = "whisper.vault-wrap."
   private var pending: (() -> Unit)? = null
@@ -113,6 +166,7 @@ class WhisperVaultModule : Module() {
     return unpack(if (e == null) wrapped.readBytes() else Base64.decode(e.getString("cipher"), Base64.NO_WRAP), key)
   }
   private fun migrate(locked: Boolean, timeout: Int): Map<String, Any> {
+    require(locked) { "Disable lock by confirming permanent vault deletion." }
     require(timeout in listOf(0, 60, 300))
     val value = master(false)
     val name = wrapPrefix + java.util.UUID.randomUUID()
@@ -236,11 +290,12 @@ class WhisperVaultModule : Module() {
     AsyncFunction("wipe") {
       authEpoch.incrementAndGet()
       synchronized(keyMutex) {
-      val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-      main.post { cancellation?.cancel(); finishAuthentication(false) }
-      store.aliases().toList().filter { it == alias || it.startsWith(wrapPrefix) }.forEach { store.deleteEntry(it) }
-      check(root.deleteRecursively()) { "Could not remove all private vault files. Retry reset." }
-      true
+        main.post { cancellation?.cancel(); finishAuthentication(false) }
+        val marker = wipeMarker()
+        RandomAccessFile(marker, "rw").use { it.write(1); it.fd.sync() }
+        syncParent(marker.parentFile!!)
+        recoverWipe()
+        true
       }
     }
   }

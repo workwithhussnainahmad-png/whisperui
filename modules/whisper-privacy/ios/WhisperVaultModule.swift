@@ -14,11 +14,34 @@ public final class WhisperVaultModule: Module {
     try target.setResourceValues(values)
   }
   private func root() throws -> URL {
+    try recoverWipe()
     let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
     let directory = base.appendingPathComponent("vault", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
     try protect(directory)
     return directory
+  }
+  private func wipeMarker() throws -> URL {
+    try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("vault-wipe.pending")
+  }
+  private func syncParent(_ url: URL) throws {
+    let fd = open(url.path, O_RDONLY)
+    guard fd >= 0 else { throw failure("Could not synchronize private vault reset") }
+    defer { close(fd) }
+    guard fsync(fd) == 0 else { throw failure("Could not synchronize private vault reset") }
+  }
+  private func recoverWipe() throws {
+    stateLock.lock(); defer { stateLock.unlock() }
+    let marker = try wipeMarker()
+    if !FileManager.default.fileExists(atPath: marker.path) { return }
+    var all = query; all.removeValue(forKey: kSecAttrAccount as String)
+    let status = SecItemDelete(all as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else { throw failure("Could not erase private vault key. Retry reset.") }
+    let directory = marker.deletingLastPathComponent().appendingPathComponent("vault")
+    if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+    try syncParent(marker.deletingLastPathComponent())
+    try FileManager.default.removeItem(at: marker)
+    try syncParent(marker.deletingLastPathComponent())
   }
   private func file(_ name: String) throws -> URL {
     guard name == "index.v1" || name.range(of: "^[0-9a-f-]{36}\\.(tmp|box)$", options: .regularExpression) != nil else { throw failure("Invalid vault file") }
@@ -68,6 +91,7 @@ public final class WhisperVaultModule: Module {
     }
   }
   private func policy() throws -> [String: Any] {
+    try recoverWipe()
     stateLock.lock(); defer { stateLock.unlock() }
     guard var data = try primaryData() else { try prune(nil); return ["enabled": false, "timeout": 60] }
     defer { data.resetBytes(in: 0..<data.count) }
@@ -128,6 +152,7 @@ public final class WhisperVaultModule: Module {
     return data
   }
   private func changeLock(_ enabled: Bool, timeout: Int) throws -> [String: Any] {
+    guard enabled else { throw failure("Disable lock by confirming permanent vault deletion.") }
     guard [0, 60, 300].contains(timeout) else { throw failure("Invalid vault timeout") }
     stateLock.lock(); let operationEpoch = epoch; stateLock.unlock()
     let context = self.context()
@@ -168,8 +193,6 @@ public final class WhisperVaultModule: Module {
       defer { verified.resetBytes(in: 0..<verified.count) }
       guard verified == value else { throw failure("Vault key verification failed") }
       next["account"] = account
-    } else {
-      next["master"] = value.base64EncodedString()
     }
     // Atomic value replacement: enabling removes the old unauthenticated master
     // from the primary item in the same commit that publishes the protected selector.
@@ -246,10 +269,13 @@ public final class WhisperVaultModule: Module {
     AsyncFunction("wipe") { () throws -> Bool in
       self.stateLock.lock(); defer { self.stateLock.unlock() }
       self.epoch += 1; self.authContext?.invalidate()
-      var all = self.query; all.removeValue(forKey: kSecAttrAccount as String)
-      let status = SecItemDelete(all as CFDictionary)
-      guard status == errSecSuccess || status == errSecItemNotFound else { throw self.failure("Could not erase private vault key. Retry reset.") }
-      try FileManager.default.removeItem(at: self.root())
+      let marker = try self.wipeMarker()
+      try Data([1]).write(to: marker, options: [.atomic, .completeFileProtection])
+      try self.protect(marker)
+      let handle = try FileHandle(forWritingTo: marker)
+      do { try handle.synchronize(); try handle.close() } catch { try? handle.close(); throw error }
+      try self.syncParent(marker.deletingLastPathComponent())
+      try self.recoverWipe()
       return true
     }
   }

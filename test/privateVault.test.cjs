@@ -219,7 +219,7 @@ test('app Save -> restart -> preview/document -> close -> delete uses vault adap
     lockStatus: async () => policy, cancelAuthentication() {},
     setLock: async (enabled, timeout) => (policy = { enabled, timeout }),
     list: f.io.list, size: (n) => f.io.file(n).size, create: (n) => { f.io.create(n); },
-    remove: f.io.remove, commit: f.io.commit, wipe: f.io.wipe,
+    remove: f.io.remove, commit: f.io.commit, wipe: async () => { await f.io.wipe(); policy = { enabled: false, timeout: 60 }; },
     masterKey: async (create) => { if (authFailure) throw new Error('Vault authentication cancelled'); return Buffer.from(await f.io.masterKey(create)).toString('base64'); },
     read: (n, offset, count) => {
       const h = f.io.file(n).open();
@@ -263,13 +263,20 @@ test('app Save -> restart -> preview/document -> close -> delete uses vault adap
   const beforeSave = fs.readdirSync(f.root);
   await assert.rejects(restarted.saveToVault({ allowSaving: true, fileUri: 'encrypted-chat-cache', fileName: 'Private.jpg', mimeType: 'image/jpeg' }, () => true), /cancelled/);
   assert.deepEqual(fs.readdirSync(f.root), beforeSave, 'cancelled authentication cannot save while locked');
-  authFailure = false; await restarted.configureVaultLock(false, 60);
+  authFailure = false; (await restarted.beginVaultSession())();
   const disk = path.join(f.root, `${item.id}.box`), cipher = fs.readFileSync(disk);
   cipher[cipher.length - 1] ^= 1; fs.writeFileSync(disk, cipher);
   await assert.rejects(restarted.acquireVaultPreview(message), /corrupted/);
   assert.deepEqual(fs.readdirSync(cache), [], 'late authentication failure removes partially decrypted preview');
   await restarted.deleteSavedFile(item.id);
-  assert.deepEqual(await app().listSavedFiles(), []);
+  const next = app(); assert.deepEqual(await next.listSavedFiles(), []); next.lockSavedFiles();
+  await restarted.disableVaultLock(async () => false);
+  assert.equal(policy.enabled, true);
+  await restarted.disableVaultLock(async () => true);
+  assert.equal(policy.enabled, false); assert.equal(f.hasKey(), false); assert.equal(fs.existsSync(f.root), false);
+  assert.deepEqual(await restarted.listSavedFiles(), []);
+  const fresh = await restarted.saveToVault({ allowSaving: true, fileUri: 'encrypted-chat-cache', fileName: 'New.jpg', mimeType: 'image/jpeg' }, () => true);
+  assert.ok(fresh.id); restarted.lockSavedFiles();
 });
 
 test('lock erases master and all live file keys, closes send leases, and denies reads', async t => {

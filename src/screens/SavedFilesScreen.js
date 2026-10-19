@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, FlatList, TouchableOpacity, Alert, AppState, StyleSheet, ActivityIndicator, Switch } from 'react-native';
+import { View, Text, FlatList, TouchableOpacity, Alert, AppState, StyleSheet, ActivityIndicator, Switch, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AttachmentViewer from '../components/AttachmentViewer';
-import { listSavedFiles, deleteSavedFile, vaultError, beginVaultSession, subscribeVaultLock, getVaultLockState, configureVaultLock, lockSavedFiles } from '../services/privateVault';
+import { listSavedFiles, deleteSavedFile, vaultError, beginVaultSession, subscribeVaultLock, getVaultLockState, configureVaultLock, disableVaultLock, lockSavedFiles } from '../services/privateVault';
 import { resetWhisper } from '../services/accountReset';
 import { ensureCaptureProtection } from '../services/captureProtection';
 import { useTheme } from '../hooks/useTheme';
@@ -12,6 +12,8 @@ export default function SavedFilesScreen({ navigation }) {
   const [items, setItems] = useState([]), [error, setError] = useState('');
   const [busy, setBusy] = useState(true), [viewing, setViewing] = useState(null);
   const [lockState, setLockState] = useState(getVaultLockState());
+  const [destructive, setDestructive] = useState(false), [confirmation, setConfirmation] = useState('');
+  const confirmWipe = useRef(null);
   const session = useRef(null);
   const mounted = useRef(true), working = useRef(false);
   async function reload() {
@@ -33,7 +35,7 @@ export default function SavedFilesScreen({ navigation }) {
       if (state.locked) { setItems([]); setViewing(null); session.current?.(); session.current = null; }
     });
     const sub = AppState.addEventListener('change', (state) => { if (state !== 'active') setViewing(null); });
-    return () => { mounted.current = false; sub.remove(); unsubscribe(); session.current?.(); };
+    return () => { confirmWipe.current?.(false); mounted.current = false; sub.remove(); unsubscribe(); session.current?.(); };
   }, []);
   async function changeLock(enabled, timeout) {
     if (working.current) return;
@@ -42,10 +44,24 @@ export default function SavedFilesScreen({ navigation }) {
     catch (e) { setError(vaultError(e)); }
     finally { working.current = false; if (mounted.current) setBusy(false); }
   }
+  async function disableLock() {
+    if (working.current) return;
+    working.current = true; setBusy(true); setError('');
+    try {
+      await disableVaultLock(() => new Promise(resolve => {
+        confirmWipe.current = resolve; setConfirmation(''); setDestructive(true);
+      }));
+    } catch (error) { if (mounted.current) setError(vaultError(error)); }
+    finally {
+      confirmWipe.current = null; working.current = false;
+      if (mounted.current) { setDestructive(false); setBusy(false); reload(); }
+    }
+  }
   function toggleLock(enabled) {
+    if (!enabled) { disableLock(); return; }
     Alert.alert(enabled ? 'Lock Saved Files?' : 'Turn off Saved Files lock?', enabled
       ? 'Your device will require authentication to read or save vault files. Removing your device PIN/passcode or losing its protected key can make saved files permanently inaccessible. There is no bypass; Reset Whisper erases them.'
-      : 'Saved Files will no longer require device authentication. Confirm with your device credential to continue.', [
+      : 'All saved files will be permanently deleted. This cannot be undone.', [
         { text: 'Cancel', style: 'cancel' },
         { text: enabled ? 'Enable lock' : 'Disable lock', onPress: () => changeLock(enabled, lockState.timeout) },
       ]);
@@ -112,6 +128,13 @@ export default function SavedFilesScreen({ navigation }) {
         </TouchableOpacity>{action('Delete', () => remove(item), busy)}
       </View>} />
     {action('Reset Whisper', reset, busy)}
+    {destructive && <SafeAreaView style={[StyleSheet.absoluteFill, { backgroundColor: colors.surface, justifyContent: 'center', padding: 24 }]}>
+      <Text style={[s.note, { color: colors.text }]}>All saved files will be permanently deleted. This cannot be undone.</Text>
+      <TextInput accessibilityLabel="Type DELETE to erase Saved Files" placeholder="Type DELETE" autoCapitalize="characters"
+        value={confirmation} onChangeText={setConfirmation} style={[s.note, { color: colors.text, borderWidth: 1, borderColor: colors.hairline }]} />
+      {action('Cancel', () => confirmWipe.current?.(false))}
+      {action('Permanently delete and disable lock', () => confirmWipe.current?.(true), confirmation !== 'DELETE')}
+    </SafeAreaView>}
     {viewing && <AttachmentViewer message={viewing} onClose={() => setViewing(null)} />}
   </SafeAreaView>;
 }

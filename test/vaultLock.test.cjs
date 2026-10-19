@@ -46,7 +46,7 @@ test('background during authentication cannot retain a returned key', async () =
   const f = fixture(); f.hooks.unlock = () => { f.api.background(false); };
   await assert.rejects(f.api.acquire(), /cancelled/); assert.equal(f.key, false);
 });
-for (const enabled of [true, false]) for (const point of ['beforeCommit', 'afterCommit']) {
+for (const enabled of [true]) for (const point of ['beforeCommit', 'afterCommit']) {
   test(`migration ${enabled ? 'enable' : 'disable'} interrupted ${point} reconciles the committed policy and stays locked`, async () => {
     const f = fixture(!enabled); f.hooks[point] = () => { throw new Error('Simulated process interruption'); };
     await assert.rejects(f.api.configure(enabled, 300));
@@ -58,5 +58,24 @@ for (const enabled of [true, false]) for (const point of ['beforeCommit', 'after
 }
 test('cancelled lock setting keeps previous protection; no silent downgrade', async () => {
   const f = fixture(); const release = await f.api.acquire(); release(); f.fail('Vault authentication cancelled');
-  await assert.rejects(f.api.configure(false, 60)); assert.equal(f.policy.enabled, true); assert.equal(f.key, false);
+  await assert.rejects(f.api.disable(async () => true)); assert.equal(f.policy.enabled, true); assert.equal(f.key, false);
+});
+
+test('disable authenticates before confirmation; cancelling either step preserves vault', async () => {
+  const f = fixture(); let confirms = 0;
+  f.fail('Vault authentication cancelled');
+  await assert.rejects(f.api.disable(async () => { confirms++; return true; }));
+  assert.equal(confirms, 0); assert.equal(f.policy.enabled, true);
+  f.fail(null); await f.api.disable(async () => { confirms++; return false; });
+  assert.equal(confirms, 1); assert.equal(f.policy.enabled, true);
+});
+test('confirmed disable wipes keys and allows a new unlocked vault', async () => {
+  const f = fixture(); await f.api.disable(async () => true);
+  assert.equal(f.policy.enabled, false); assert.equal(f.key, false);
+  const release = await f.api.acquire(); assert.equal(f.api.getState().locked, false); release();
+});
+test('background or timeout during destructive confirmation prevents wipe', async () => {
+  const f = fixture();
+  await assert.rejects(f.api.disable(async () => { f.api.background(false); return true; }));
+  assert.equal(f.policy.enabled, true);
 });

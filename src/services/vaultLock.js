@@ -66,7 +66,21 @@ export function createVaultLock(io) {
       foreground = active;
       if (!active && state.enabled && !state.authenticating) lock();
     },
+    async disable(confirm) {
+      await initialize();
+      if (!state.enabled) return;
+      lock(); // Force a new OS key authentication even if a screen was already open.
+      const release = await acquire();
+      const token = epoch;
+      try {
+        if (!await confirm()) return;
+        if (epoch !== token || !foreground || state.locked) throw new Error('Saved Files locked. Retry disabling.');
+        lock(); await io.wipe(); policy = null; ready = null;
+        state = { enabled: false, timeout: 60, locked: false, authenticating: false, recovery: false }; emit();
+      } finally { release(); }
+    },
     async configure(enabled, timeout) {
+      if (!enabled) throw new Error('Disabling lock requires confirmation and erases all saved files.');
       await initialize();
       if (pending) throw new Error('Vault authentication is already in progress.');
       // Ensure a new empty vault has a master before migration, then erase JS keys.

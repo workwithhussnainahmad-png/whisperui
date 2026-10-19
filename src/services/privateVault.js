@@ -55,6 +55,7 @@ export const subscribeVaultLock = listener => lock.subscribe(listener);
 export const beginVaultSession = () => lock.acquire();
 export const lockSavedFiles = () => lock.lock();
 export const setVaultAppActive = active => lock.background(active);
+export const disableVaultLock = confirm => lock.disable(confirm);
 export const configureVaultLock = (enabled, timeout) => lock.configure(enabled, timeout);
 async function access(work) { const release = await lock.acquire(); try { return await work(); } catch (error) { lock.fail(error); throw error; } finally { release(); } }
 export function vaultError(error) {
